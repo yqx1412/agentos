@@ -1,0 +1,142 @@
+"""The basic agent loop: call the model, run requested tools, feed results back, repeat."""
+
+from __future__ import annotations
+
+import json
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Literal
+
+from agentos.llm import LLM, Message
+from agentos.tools import ToolRegistry
+
+DEFAULT_SYSTEM_PROMPT = """\
+You are AgentOS, an agent that completes tasks by calling tools.
+- Use tools to read, compute and write; never guess file contents or arithmetic.
+- File paths are relative to the workspace.
+- If a tool returns an ERROR, read it, fix the call and try again.
+- When the task is complete, reply with a short final answer and no tool calls."""
+
+StopReason = Literal["final_answer", "max_steps"]
+
+
+class Tracer:
+    """Appends one JSON object per event to a JSONL file (or discards them if path is None)."""
+
+    def __init__(self, path: Path | None) -> None:
+        self.path = path
+        if path is not None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+
+    def emit(self, event: str, **data: Any) -> None:
+        if self.path is None:
+            return
+        record = {"ts": round(time.time(), 3), "event": event, **data}
+        with self.path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+
+
+@dataclass
+class AgentResult:
+    answer: str
+    stop_reason: StopReason
+    steps: int
+    tool_calls: int
+    tool_errors: int
+    prompt_tokens: int
+    completion_tokens: int
+    messages: list[Message] = field(repr=False)
+
+
+class Agent:
+    def __init__(
+        self,
+        llm: LLM,
+        tools: ToolRegistry,
+        *,
+        system_prompt: str = DEFAULT_SYSTEM_PROMPT,
+        max_steps: int = 10,
+        tracer: Tracer | None = None,
+    ) -> None:
+        if max_steps < 1:
+            raise ValueError("max_steps must be >= 1")
+        self.llm = llm
+        self.tools = tools
+        self.system_prompt = system_prompt
+        self.max_steps = max_steps
+        self.tracer = tracer or Tracer(None)
+
+    def run(self, task: str) -> AgentResult:
+        messages = [
+            Message(role="system", content=self.system_prompt),
+            Message(role="user", content=task),
+        ]
+        schemas = self.tools.schemas()
+        n_calls = n_errors = p_tok = c_tok = 0
+        self.tracer.emit("run_start", model=self.llm.model, task=task, tools=self.tools.names())
+
+        for step in range(1, self.max_steps + 1):
+            resp = self.llm.chat(messages, schemas)
+            p_tok += resp.prompt_tokens
+            c_tok += resp.completion_tokens
+            reply = resp.message
+            messages.append(reply)
+            self.tracer.emit(
+                "llm_response",
+                step=step,
+                content=reply.content,
+                tool_calls=[c.model_dump() for c in reply.tool_calls],
+                prompt_tokens=resp.prompt_tokens,
+                completion_tokens=resp.completion_tokens,
+            )
+
+            if not reply.tool_calls:
+                return self._finish(
+                    reply.content, "final_answer", step, n_calls, n_errors, p_tok, c_tok, messages
+                )
+
+            for call in reply.tool_calls:
+                n_calls += 1
+                result = self.tools.execute(call)
+                n_errors += not result.ok
+                self.tracer.emit(
+                    "tool_result", step=step, call=call.model_dump(), **result.model_dump()
+                )
+                messages.append(
+                    Message(
+                        role="tool",
+                        content=result.as_message_content(),
+                        tool_name=call.name,
+                        tool_call_id=call.id,
+                    )
+                )
+
+        last = next((m.content for m in reversed(messages) if m.role == "assistant"), "")
+        return self._finish(
+            last, "max_steps", self.max_steps, n_calls, n_errors, p_tok, c_tok, messages
+        )
+
+    def _finish(
+        self,
+        answer: str,
+        reason: StopReason,
+        steps: int,
+        n_calls: int,
+        n_errors: int,
+        p_tok: int,
+        c_tok: int,
+        messages: list[Message],
+    ) -> AgentResult:
+        result = AgentResult(answer, reason, steps, n_calls, n_errors, p_tok, c_tok, messages)
+        self.tracer.emit(
+            "run_end",
+            answer=answer,
+            stop_reason=reason,
+            steps=steps,
+            tool_calls=n_calls,
+            tool_errors=n_errors,
+            prompt_tokens=p_tok,
+            completion_tokens=c_tok,
+        )
+        return result
