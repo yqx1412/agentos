@@ -53,5 +53,5 @@ def test_request_and_response_mapping() -> None:
 
 def test_http_error_becomes_llm_error() -> None:
     llm = make_llm(lambda _: httpx.Response(404, json={"error": "model not found"}))
-    with pytest.raises(LLMError, match="Ollama request failed"):
+    with pytest.raises(LLMError, match=r"HTTP 404: .*model not found"):
         llm.chat([Message(role="user", content="hi")], tools=[])

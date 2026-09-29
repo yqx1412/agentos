@@ -1,0 +1,19 @@
+# AgentOS runtime config. Adding an MCP server is a config edit only:
+# add a [mcp_servers.<name>] table and its tools appear as <name>__<tool>.
+#
+# Placeholders: {workspace} = the --workspace directory, {python} = AgentOS's interpreter.
+# Keys: command, args, env, cwd, enabled, tools (allowlist), timeout, startup_timeout.
+
+# Reference filesystem server (Node.js). Scoped to the workspace; the allowlist keeps the
+# tool list short, which matters for small local models (the server exposes 14 tools).
+[mcp_servers.filesystem]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem@2026.8.31", "{workspace}"]
+cwd = "{workspace}"      # so relative paths resolve inside the workspace
+tools = ["read_text_file", "write_file", "list_directory", "search_files"]
+startup_timeout = 120  # first run downloads the package
+
+# AgentOS's own example server: text statistics (src/agentos/mcp_servers/textkit.py).
+[mcp_servers.textkit]
+command = "{python}"
+args = ["-m", "agentos.mcp_servers.textkit"]
