@@ -1,0 +1,68 @@
+category: math
+tasks:
+  - id: ma-compound
+    prompt: >-
+      2500 is invested at 4% annual interest, compounded yearly, for 7 years.
+      Write the final amount, rounded to 2 decimal places, to amount.txt.
+    checks:
+      - {type: file_number, path: amount.txt, value: 3289.83, tol: 0.011}
+
+  - id: ma-sum-file
+    prompt: Add up all the numbers in numbers.txt and write the total to total.txt.
+    files:
+      numbers.txt: "17\n42\n8\n91\n33\n5\n64\n"
+    checks:
+      - {type: file_number, path: total.txt, value: 260}
+
+  - id: ma-average-csv
+    prompt: Compute the average score in scores.csv and write it to average.txt.
+    files:
+      scores.csv: "name,score\nana,88\nben,73\ncy,95\ndee,61\neli,83\n"
+    checks:
+      - {type: file_number, path: average.txt, value: 80, tol: 0.001}
+
+  - id: ma-percent-change
+    prompt: Revenue went from 48,000 to 57,600. What is the percent change? Answer with the number.
+    checks:
+      - {type: answer_number, value: 20, tol: 0.001}
+
+  - id: ma-energy
+    prompt: >-
+      A GPU draws 165 W for 6.5 hours a day. How many kWh does it use over 30 days?
+      Write the number to kwh.txt.
+    checks:
+      - {type: file_number, path: kwh.txt, value: 32.175, tol: 0.01}
+
+  - id: ma-max-csv
+    prompt: Which region in sales.csv sold the most units? Write only the region name to top.txt.
+    files:
+      sales.csv: "region,units\nnorth,340\nsouth,415\neast,298\nwest,407\n"
+    checks:
+      - {type: file_equals, path: top.txt, value: south, case_sensitive: false}
+
+  - id: ma-sort
+    prompt: Sort the numbers in unsorted.txt from smallest to largest and write them to sorted.txt, one per line.
+    files:
+      unsorted.txt: "42\n7\n19\n3\n88\n23\n"
+    checks:
+      - {type: file_lines, path: sorted.txt, lines: ["3", "7", "19", "23", "42", "88"]}
+
+  - id: ma-time
+    prompt: A train leaves at 09:40 and the trip takes 2 hours 55 minutes. When does it arrive? Answer as HH:MM.
+    checks:
+      - {type: answer_contains, values: ["12:35"]}
+
+  - id: ma-sqrt-cube
+    prompt: What is the square root of 1764 plus 3 cubed? Answer with the number.
+    checks:
+      - {type: answer_number, value: 69}
+
+  - id: ma-percent-of
+    category: recovery
+    notes: >-
+      The calculator has no % operator and rejects "2,340" (a tuple), so a literal
+      translation of the prompt errors and the model has to rewrite the expression.
+    prompt: Use the calculator to compute 15% of 2,340 and write the result to tip.txt.
+    checks:
+      - {type: file_number, path: tip.txt, value: 351, tol: 0.001}
+      - {type: tool_used, name: calculator}

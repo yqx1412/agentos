@@ -1,0 +1,91 @@
+category: chaining
+tasks:
+  - id: ch-pointer
+    prompt: Follow the clues starting from start.txt and write the final word you find to found.txt.
+    files:
+      start.txt: "The next clue is in clue.txt.\n"
+      clue.txt: "Look in vault/secret.txt for the word.\n"
+      vault/secret.txt: "otter\n"
+    checks:
+      - {type: file_equals, path: found.txt, value: otter, case_sensitive: false}
+
+  - id: ch-combine
+    prompt: Write the word in first.txt, a space, and the word in second.txt to greeting.txt.
+    files:
+      first.txt: "Hello\n"
+      second.txt: "World\n"
+    checks:
+      - {type: file_equals, path: greeting.txt, value: Hello World}
+
+  - id: ch-json-config
+    prompt: >-
+      Using config.json, how many samples are processed in total
+      (batch_size x steps x gpus)? Write the number to samples.txt.
+    files:
+      config.json: '{"batch_size": 16, "steps": 250, "gpus": 2}'
+    checks:
+      - {type: file_number, path: samples.txt, value: 8000}
+
+  - id: ch-quarters
+    prompt: q1.txt to q4.txt each hold one quarter's sales. Write the yearly total to year_total.txt.
+    files:
+      q1.txt: "1200\n"
+      q2.txt: "1350\n"
+      q3.txt: "980\n"
+      q4.txt: "1470\n"
+    checks:
+      - {type: file_number, path: year_total.txt, value: 5000}
+
+  - id: ch-csv-to-json
+    prompt: >-
+      For each item in inventory.csv compute qty times price, and write inventory.json
+      as a JSON object that maps each item name to that value.
+    files:
+      inventory.csv: "item,qty,price\napple,10,0.5\npear,4,0.75\nplum,20,0.25\n"
+    checks:
+      - {type: file_json, path: inventory.json, value: {apple: 5, pear: 3, plum: 5}}
+
+  - id: ch-log-report
+    prompt: >-
+      Count the ERROR and WARN lines in app.log and write report.txt with two lines:
+      'errors: N' and 'warnings: M'.
+    files:
+      app.log: |
+        INFO server started
+        WARN disk usage at 81%
+        INFO request /health 200
+        ERROR request /upload 500
+        INFO request /models 200
+        ERROR model load timeout
+        WARN slow response 2.3s
+        ERROR request /upload 500
+    checks:
+      - {type: file_contains, path: report.txt, values: ["errors: 3", "warnings: 2"]}
+
+  - id: ch-contact-json
+    prompt: Create contact.json with the keys name, email and phone, filled from contacts.txt.
+    files:
+      contacts.txt: "Name: Ada Lovelace\nEmail: ada@example.com\nPhone: 555-0101\n"
+    checks:
+      - type: file_json
+        path: contact.json
+        value: {name: Ada Lovelace, email: ada@example.com, phone: 555-0101}
+
+  - id: ch-template
+    prompt: Fill in the placeholders in template.txt with the values from data.json and write the result to letter.txt.
+    files:
+      template.txt: "Dear {name}, your order {order} ships on {date}.\n"
+      data.json: '{"name": "Sam", "order": "A-1043", "date": "Oct 3"}'
+    checks:
+      - {type: file_equals, path: letter.txt, value: "Dear Sam, your order A-1043 ships on Oct 3."}
+
+  - id: ch-price-update
+    prompt: >-
+      prices.txt has one 'item: price' per line. Raise every price by 10% and write the
+      new list to new_prices.txt in the same format, with 2 decimal places.
+    files:
+      prices.txt: "coffee: 3.00\nbagel: 2.50\njuice: 4.20\n"
+    checks:
+      - {type: file_regex, path: new_prices.txt, pattern: '^\s*coffee:\s*\$?3\.30\s*$'}
+      - {type: file_regex, path: new_prices.txt, pattern: '^\s*bagel:\s*\$?2\.75\s*$'}
+      - {type: file_regex, path: new_prices.txt, pattern: '^\s*juice:\s*\$?4\.62\s*$'}

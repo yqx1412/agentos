@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import uuid
 from typing import Any, Literal, Protocol
 
@@ -60,25 +61,44 @@ class OllamaLLM:
         *,
         think: bool = False,
         temperature: float = 0.0,
+        num_ctx: int | None = 8192,
+        num_predict: int | None = 2048,
         timeout: float = 300.0,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         self.model = model
         self.think = think
         self.temperature = temperature
+        # Ollama's own default context is 4096 tokens and it truncates longer prompts
+        # silently, which multi-step tool use exceeds quickly.
+        self.num_ctx = num_ctx
+        # Caps one reply. Without it a degenerate generation runs until the HTTP timeout.
+        self.num_predict = num_predict
         self._client = httpx.Client(base_url=base_url, timeout=timeout, transport=transport)
 
-    def chat(self, messages: list[Message], tools: list[dict[str, Any]]) -> ChatResponse:
-        payload: dict[str, Any] = {
-            "model": self.model,
-            "messages": [_to_ollama(m) for m in messages],
-            "tools": tools,
-            "stream": False,
-            "think": self.think,
-            "options": {"temperature": self.temperature},
-        }
+    def _options(self) -> dict[str, Any]:
+        opts: dict[str, Any] = {"temperature": self.temperature}
+        if self.num_ctx is not None:
+            opts["num_ctx"] = self.num_ctx
+        if self.num_predict is not None:
+            opts["num_predict"] = self.num_predict
+        return opts
+
+    def warmup(self) -> None:
+        """Load the model into memory so the first timed request does not pay for it."""
+        self._post(
+            "/api/generate",
+            {"model": self.model, "keep_alive": "10m", "options": self._options()},
+        )
+
+    def unload(self) -> None:
+        """Free the model's (V)RAM; errors are ignored because nothing depends on it."""
+        with contextlib.suppress(httpx.HTTPError):
+            self._client.post("/api/generate", json={"model": self.model, "keep_alive": 0})
+
+    def _post(self, path: str, payload: dict[str, Any]) -> httpx.Response:
         try:
-            resp = self._client.post("/api/chat", json=payload)
+            resp = self._client.post(path, json=payload)
             resp.raise_for_status()
         except httpx.HTTPStatusError as exc:
             # Ollama puts the real reason in the body, e.g. {"error": "..."}.
@@ -88,6 +108,18 @@ class OllamaLLM:
             ) from exc
         except httpx.HTTPError as exc:
             raise LLMError(f"Ollama request failed: {exc}") from exc
+        return resp
+
+    def chat(self, messages: list[Message], tools: list[dict[str, Any]]) -> ChatResponse:
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": [_to_ollama(m) for m in messages],
+            "tools": tools,
+            "stream": False,
+            "think": self.think,
+            "options": self._options(),
+        }
+        resp = self._post("/api/chat", payload)
 
         data = resp.json()
         raw = data.get("message", {})
