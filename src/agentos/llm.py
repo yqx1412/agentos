@@ -80,6 +80,12 @@ class OllamaLLM:
         try:
             resp = self._client.post("/api/chat", json=payload)
             resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            # Ollama puts the real reason in the body, e.g. {"error": "..."}.
+            detail = exc.response.text.strip()[:500]
+            raise LLMError(
+                f"Ollama returned HTTP {exc.response.status_code}: {detail or '<empty body>'}"
+            ) from exc
         except httpx.HTTPError as exc:
             raise LLMError(f"Ollama request failed: {exc}") from exc
 
