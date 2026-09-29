@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import json
 import os
 import sys
 from collections.abc import Iterator
@@ -13,6 +14,9 @@ from typing import TextIO
 
 from agentos import __version__
 from agentos.agent import Agent, Tracer
+from agentos.bench.report import render_markdown, summary_table
+from agentos.bench.runner import TaskResult, run_bench
+from agentos.bench.tasks import TaskError, load_tasks, select_tasks
 from agentos.builtin_tools import builtin_tools
 from agentos.config import AgentOSConfig, ConfigError, load_config
 from agentos.llm import LLMError, OllamaLLM
@@ -20,6 +24,7 @@ from agentos.mcp_client import MCPError, MCPManager
 from agentos.tools import ToolRegistry
 
 DEFAULT_CONFIG = Path("agentos.toml")
+DEFAULT_TASKS = Path("benchmarks/tasks")
 
 
 def _add_common(p: argparse.ArgumentParser) -> None:
@@ -44,17 +49,39 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--max-steps", type=int, default=10)
     run.add_argument("--ollama-url", default="http://127.0.0.1:11434")
     run.add_argument("--think", action="store_true", help="Enable model thinking (slower)")
+    run.add_argument("--num-ctx", type=int, default=8192, help="Model context window")
     run.add_argument("--trace-dir", type=Path, default=Path("runs"), help="Where JSONL traces go")
     run.add_argument("--no-trace", action="store_true")
     _add_common(run)
 
     tools = sub.add_parser("tools", help="List the tools the agent would see")
     _add_common(tools)
+
+    bench = sub.add_parser("bench", help="Run the benchmark task set against models")
+    bench.add_argument(
+        "--models", default="qwen3:8b", help="Comma-separated Ollama models (default: qwen3:8b)"
+    )
+    bench.add_argument("--tasks", type=Path, default=DEFAULT_TASKS, help="Task YAML directory")
+    bench.add_argument(
+        "--only", default=None, help="Comma-separated task id or category globs, e.g. 'mcp,fo-*'"
+    )
+    bench.add_argument("--repeats", type=int, default=1)
+    bench.add_argument("--out", type=Path, default=Path("runs/bench"), help="Results root")
+    bench.add_argument("--list", action="store_true", help="List the selected tasks and exit")
+    bench.add_argument("--ollama-url", default="http://127.0.0.1:11434")
+    bench.add_argument("--num-ctx", type=int, default=8192, help="Model context window")
+    bench.add_argument("--timeout", type=float, default=180.0, help="Seconds per model request")
+    bench.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help=f"Config with the MCP servers tasks use (default: ./{DEFAULT_CONFIG})",
+    )
     return parser
 
 
 def _load(args: argparse.Namespace) -> AgentOSConfig:
-    if args.no_mcp:
+    if getattr(args, "no_mcp", False):
         return AgentOSConfig()
     if args.config is not None:
         return load_config(args.config)
@@ -86,23 +113,101 @@ def _open_log(path: Path | None) -> Iterator[TextIO]:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    if args.command not in ("run", "tools"):
+    if args.command not in ("run", "tools", "bench"):
         parser.print_help()
         return 0
 
-    workspace = args.workspace.resolve()
-    if not workspace.is_dir():
-        print(f"workspace does not exist: {workspace}", file=sys.stderr)
-        return 2
     try:
         config = _load(args)
     except ConfigError as exc:
         print(f"config error: {exc}", file=sys.stderr)
         return 2
+    if args.command == "bench":
+        return _cmd_bench(args, config)
+
+    workspace = args.workspace.resolve()
+    if not workspace.is_dir():
+        print(f"workspace does not exist: {workspace}", file=sys.stderr)
+        return 2
 
     if args.command == "tools":
         return _cmd_tools(config, workspace)
     return _cmd_run(args, config, workspace)
+
+
+def _cmd_bench(args: argparse.Namespace, config: AgentOSConfig) -> int:
+    try:
+        tasks = select_tasks(load_tasks(args.tasks), _split(args.only))
+    except TaskError as exc:
+        print(f"task error: {exc}", file=sys.stderr)
+        return 2
+    if not tasks:
+        print(f"no tasks match --only {args.only!r}", file=sys.stderr)
+        return 2
+    if args.list:
+        for t in tasks:
+            servers = f" [{', '.join(t.servers)}]" if t.servers else ""
+            print(f"{t.id:<22} {t.category:<10}{servers}")
+        print(f"\n{len(tasks)} tasks", file=sys.stderr)
+        return 0
+
+    models = _split(args.models) or []
+    out_dir = args.out / datetime.now().strftime("%Y%m%d-%H%M%S")
+    settings = {
+        "num_ctx": args.num_ctx,
+        "num_predict": 2048,
+        "temperature": 0.0,
+        "think": False,
+        "timeout": args.timeout,
+        "agent": "plain loop (A1)",
+    }
+
+    def factory(model: str) -> OllamaLLM:
+        return OllamaLLM(model, args.ollama_url, num_ctx=args.num_ctx, timeout=args.timeout)
+
+    def progress(r: TaskResult, done: int, total: int) -> None:
+        status = "PASS" if r.passed else "FAIL"
+        why = ""
+        if not r.passed:
+            why = r.error or next((c["detail"] for c in r.checks if not c["ok"]), "")
+            why = why if r.stop_reason in (None, "final_answer") else f"stopped: {r.stop_reason}"
+            why = f"  {why[:100]}"
+        print(
+            f"[{done}/{total}] {r.model:<12} {r.task_id:<22} {status} {r.seconds:5.1f}s{why}",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    try:
+        results = run_bench(
+            models,
+            tasks,
+            llm_factory=factory,
+            config=config,
+            out_dir=out_dir,
+            repeats=args.repeats,
+            settings=settings,
+            progress=progress,
+        )
+    except ConfigError as exc:
+        print(f"config error: {exc}", file=sys.stderr)
+        return 2
+    except LLMError as exc:  # warmup failed: model missing or Ollama down
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    meta = json.loads((out_dir / "meta.json").read_text(encoding="utf-8"))
+    report = render_markdown(results, meta)
+    (out_dir / "summary.md").write_text(report, encoding="utf-8")
+    print(summary_table(results))
+    print(f"\nFull report: {out_dir / 'summary.md'}", file=sys.stderr)
+    return 0
+
+
+def _split(value: str | None) -> list[str] | None:
+    if not value:
+        return None
+    return [v.strip() for v in value.split(",") if v.strip()]
 
 
 def _cmd_tools(config: AgentOSConfig, workspace: Path) -> int:
@@ -127,7 +232,7 @@ def _cmd_run(args: argparse.Namespace, config: AgentOSConfig, workspace: Path) -
         if config.enabled_servers(workspace):
             log_path = trace_path.with_suffix(".mcp.log")
 
-    llm = OllamaLLM(args.model, args.ollama_url, think=args.think)
+    llm = OllamaLLM(args.model, args.ollama_url, think=args.think, num_ctx=args.num_ctx)
     try:
         with _open_log(log_path) as log, _registry(config, workspace, log) as (registry, _):
             agent = Agent(llm, registry, max_steps=args.max_steps, tracer=Tracer(trace_path))

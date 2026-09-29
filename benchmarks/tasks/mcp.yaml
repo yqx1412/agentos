@@ -1,0 +1,94 @@
+category: mcp
+tasks:
+  - id: mcp-top-word
+    servers: [textkit]
+    prompt: Use textkit__word_frequency to find the most frequent word in essay.txt and write that word to top_word.txt.
+    files:
+      essay.txt: "Good data beats clever models. Clean data, labeled data and fresh data matter more than architecture. Models trained on messy data learn messy patterns, so invest in data first.\n"
+    checks:
+      - {type: file_equals, path: top_word.txt, value: data, case_sensitive: false}
+      - {type: tool_used, name: textkit__word_frequency}
+
+  - id: mcp-find-todo
+    servers: [textkit]
+    prompt: >-
+      Use textkit__find_lines to find the lines containing TODO in code.py, and write
+      their line numbers, comma separated, to todos.txt.
+    files:
+      code.py: |
+        import json
+
+        # TODO: validate the schema
+        def load(path):
+            with open(path) as f:
+                return json.load(f)
+        # TODO: add retries
+        def save(path, data):
+            ...
+    checks:
+      - {type: file_regex, path: todos.txt, pattern: '^\s*3\s*,\s*7\s*$'}
+      - {type: tool_used, name: textkit__find_lines}
+
+  - id: mcp-chars
+    servers: [textkit]
+    prompt: Use textkit__text_stats to count the characters in motto.txt and write the count to chars.txt.
+    files:
+      motto.txt: "Measure twice, cut once."
+    checks:
+      - {type: file_number, path: chars.txt, value: 24}
+      - {type: tool_used, name: textkit__text_stats}
+
+  - id: mcp-word-total
+    servers: [textkit]
+    prompt: >-
+      Use textkit__text_stats on a.txt and on b.txt, then write the total number of
+      words in both files to total_words.txt.
+    files:
+      a.txt: "The planner splits a task into steps and the executor runs each step.\n"
+      b.txt: "Verification checks every tool result before the agent continues.\n"
+    checks:
+      - {type: file_number, path: total_words.txt, value: 22}
+      - {type: tool_used, name: textkit__text_stats}
+
+  - id: mcp-fs-count
+    servers: [filesystem]
+    prompt: Use filesystem__list_directory on the data directory and write how many .csv files it contains to count.txt.
+    files:
+      data/a.csv: "x\n1\n"
+      data/b.csv: "x\n2\n"
+      data/c.csv: "x\n3\n"
+      data/readme.txt: "sample data\n"
+      data/notes.txt: "todo\n"
+    checks:
+      - {type: file_number, path: count.txt, value: 3}
+      - {type: tool_used, name: filesystem__list_directory}
+
+  - id: mcp-lecture-summary
+    servers: [filesystem, textkit]
+    notes: >-
+      A2 demo task. llama3.1:8b recovered from an MCP validation error, then Ollama aborted
+      it with "token repeat limit reached".
+    prompt: >-
+      Use the filesystem__ tools to find the .txt files under lectures, read each one,
+      use textkit__word_frequency to find each file's most frequent word, and write
+      summary.txt with one line per file in the form '<filename>: <word>'.
+    files:
+      lectures/raft.txt: "Raft elects a leader for each term. Every leader sends heartbeats to followers. If followers stop hearing from the leader they start an election. The new leader then replicates its log to followers, and a leader commits entries once a majority has them.\n"
+      lectures/paxos.txt: "Paxos reaches consensus through proposers and acceptors. Proposers send prepare messages; acceptors promise not to accept older proposals. When a majority of acceptors accept a value, the acceptors have chosen it, and learners hear about it from acceptors.\n"
+    checks:
+      - {type: file_regex, path: summary.txt, pattern: '^\s*(lectures[/\\])?raft(\.txt)?\s*:\s*leader\s*$'}
+      - {type: file_regex, path: summary.txt, pattern: '^\s*(lectures[/\\])?paxos(\.txt)?\s*:\s*acceptors\s*$'}
+      - {type: tool_used, name: textkit__word_frequency}
+
+  - id: mcp-find-similar
+    category: recovery
+    servers: [filesystem]
+    notes: notes.txt does not exist; the model must look around and find notes.md.
+    prompt: >-
+      Read notes.txt and write its first line to first_line.txt. If notes.txt does not
+      exist, list the workspace directory to find the similarly named file and use that.
+    files:
+      notes.md: "# Meeting 12\n- ship A3\n- review benchmark\n"
+    checks:
+      - {type: file_equals, path: first_line.txt, value: "# Meeting 12"}
+      - {type: file_absent, path: notes.txt}
