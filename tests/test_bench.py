@@ -260,7 +260,41 @@ def test_run_bench_writes_results_and_manages_models(tmp_path: Path) -> None:
     assert json.loads(lines[0])["task_id"] == "copy"
     meta = json.loads((tmp_path / "meta.json").read_text(encoding="utf-8"))
     assert meta["settings"] == {"num_ctx": 8192}
-    assert (tmp_path / "traces" / "m1" / "copy-r1.jsonl").is_file()
+    assert (tmp_path / "traces" / "m1" / "plain" / "copy-r1.jsonl").is_file()
+
+
+def test_run_bench_compares_agent_kinds(tmp_path: Path) -> None:
+    one_step = assistant('{"steps": [{"id": 1, "goal": "copy a.txt to b.txt"}]}')
+    results = run_bench(
+        ["m1"],
+        [COPY_TASK],
+        llm_factory=lambda m: Lifecycle(m, [*solve_copy(), one_step, *solve_copy()], []),
+        config=AgentOSConfig(),
+        out_dir=tmp_path,
+        agents=["plain", "planner"],
+    )
+    assert [(r.agent, r.mode, r.passed) for r in results] == [
+        ("plain", "plain", True),
+        ("planner", "direct", True),
+    ]
+    assert (tmp_path / "traces" / "m1" / "planner" / "copy.jsonl").is_file()
+    assert json.loads((tmp_path / "meta.json").read_text("utf-8"))["agents"] == ["plain", "planner"]
+    table = summary_table(results)
+    assert "| m1 / plain | 1/1 |" in table
+    assert "| m1 / planner | 1/1 |" in table
+    assert "| m1 | 1 (1) | 0 (0) | 0 (0) |" in render_markdown(results)
+
+
+def test_run_bench_rejects_unknown_agent_kind(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="unknown agent kinds"):
+        run_bench(
+            ["m1"],
+            [COPY_TASK],
+            llm_factory=lambda m: ScriptedLLM([]),
+            config=AgentOSConfig(),
+            out_dir=tmp_path,
+            agents=["swarm"],
+        )
 
 
 def test_report_tables(tmp_path: Path) -> None:
