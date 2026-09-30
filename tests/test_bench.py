@@ -282,7 +282,7 @@ def test_run_bench_compares_agent_kinds(tmp_path: Path) -> None:
     table = summary_table(results)
     assert "| m1 / plain | 1/1 |" in table
     assert "| m1 / planner | 1/1 |" in table
-    assert "| m1 | 1 (1) | 0 (0) | 0 (0) |" in render_markdown(results)
+    assert "| m1 / planner | 1 (1) | 0 (0) | 0 (0) |" in render_markdown(results)
 
 
 def test_run_bench_rejects_unknown_agent_kind(tmp_path: Path) -> None:

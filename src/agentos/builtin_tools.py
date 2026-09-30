@@ -61,7 +61,8 @@ def file_tools(workspace: Path) -> list[Tool]:
         Tool("read_file", "Read a UTF-8 text file from the workspace.", ReadFileArgs, read_file),
         Tool(
             "write_file",
-            "Write a UTF-8 text file in the workspace, creating or overwriting it.",
+            "Write a UTF-8 text file in the workspace, creating or overwriting it. "
+            "Missing parent directories are created automatically.",
             WriteFileArgs,
             write_file,
         ),

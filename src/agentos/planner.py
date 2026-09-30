@@ -30,6 +30,8 @@ Rules:
 - If the whole task needs fewer than about 4 tool calls, return exactly ONE step.
 - Use several steps only for genuinely separate parts: different outputs, or a result
   that must be found before the next part can even start.
+- Every step must be doable with the tools listed below; do not plan steps no tool
+  performs (read the tool descriptions: some do more than their name says).
 - A step may depend on earlier steps; list their ids in depends_on.
 - Say which values a step must report, so later steps can use them.
 - Do not add a step for giving the final answer; that happens automatically.
@@ -71,6 +73,16 @@ class Plan(BaseModel):
         if len(set(ids)) != len(ids):
             raise ValueError(f"duplicate step ids: {ids}")
         return self
+
+    def drop_stale_deps(self, finished: set[int]) -> None:
+        """In a revised plan, forget dependencies on steps that did not finish.
+
+        Models often keep ``depends_on: [1]`` after step 1 failed. There is nothing to wait
+        for, so rejecting the whole plan for it only burns the replan budget.
+        """
+        ids = {s.id for s in self.steps}
+        for s in self.steps:
+            s.depends_on = [d for d in s.depends_on if d in ids or d in finished]
 
     def check_graph(self, known: set[int] | None = None) -> None:
         """Raise ValueError on unknown dependencies or cycles. ``known`` = finished step ids."""
@@ -143,7 +155,7 @@ class Planner:
             Message(role="system", content=self.system_prompt),
             Message(role="user", content=f"Task: {task}"),
         ]
-        return self._ask(messages, known=set())
+        return self._ask(messages, known=set(), revising=False)
 
     def revise(
         self, task: str, finished: dict[int, tuple[str, str]], step_id: int, reason: str
@@ -161,9 +173,9 @@ class Planner:
                 ),
             ),
         ]
-        return self._ask(messages, known=set(finished))
+        return self._ask(messages, known=set(finished), revising=True)
 
-    def _ask(self, messages: list[Message], known: set[int]) -> PlanResult:
+    def _ask(self, messages: list[Message], known: set[int], revising: bool) -> PlanResult:
         p_tok = c_tok = 0
         last_error = ""
         for attempt in range(1, self.max_attempts + 1):
@@ -173,6 +185,8 @@ class Planner:
             text = resp.message.content
             try:
                 plan = Plan.model_validate(extract_json(text))
+                if revising:
+                    plan.drop_stale_deps(known)
                 plan.check_graph(known)
                 return PlanResult(plan, p_tok, c_tok, attempt)
             except (ValueError, ValidationError) as exc:

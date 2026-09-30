@@ -31,7 +31,26 @@ from agentos.mcp_client import MCPError, MCPManager
 from agentos.tools import ToolRegistry
 
 LLMFactory = Callable[[str], LLM]
-AGENT_KINDS = ("plain", "planner")
+# Agent kinds, cumulative for the A5 ablation: each adds one mechanism to the previous.
+AGENT_KINDS: dict[str, dict[str, Any] | None] = {
+    "plain": None,  # the A1 loop
+    "planner": {},  # + A4 planner / task graph
+    "planner-verify": {"verify": True},  # + A5 step verification (rejection -> replan)
+    "planner-verify-retry": {"verify": True, "step_retries": 2},  # + retry with feedback
+}
+
+
+def make_agent(
+    kind: str, llm: LLM, registry: ToolRegistry, *, max_steps: int, tracer: Tracer
+) -> Agent | PlanningAgent:
+    if kind not in AGENT_KINDS:
+        raise ConfigError(f"unknown agent kind {kind!r}; choose from {list(AGENT_KINDS)}")
+    options = AGENT_KINDS[kind]
+    if options is None:
+        return Agent(llm, registry, max_steps=max_steps, tracer=tracer)
+    return PlanningAgent(llm, registry, max_steps=max_steps, tracer=tracer, **options)
+
+
 Progress = Callable[["TaskResult", int, int], None]
 
 
@@ -57,6 +76,8 @@ class TaskResult(BaseModel):
     mode: str = "plain"
     plan_steps: int = 0
     replans: int = 0
+    rejections: int = 0
+    retries: int = 0
 
 
 def check_servers(tasks: list[Task], config: AgentOSConfig) -> None:
@@ -101,12 +122,9 @@ def run_task(
         try:
             with MCPManager(servers, errlog=log) as mcp:
                 registry = ToolRegistry([*builtin_tools(workspace), *mcp.tools()])
-                tracer = Tracer(trace_path)
-                agent: Agent | PlanningAgent
-                if agent_kind == "planner":
-                    agent = PlanningAgent(llm, registry, max_steps=task.max_steps, tracer=tracer)
-                else:
-                    agent = Agent(llm, registry, max_steps=task.max_steps, tracer=tracer)
+                agent = make_agent(
+                    agent_kind, llm, registry, max_steps=task.max_steps, tracer=Tracer(trace_path)
+                )
                 res = agent.run(task.prompt)
             stop_reason, answer = res.stop_reason, res.answer
             stats = {
@@ -118,6 +136,8 @@ def run_task(
                 "mode": res.mode,
                 "plan_steps": len(res.plan or []),
                 "replans": res.replans,
+                "rejections": res.rejections,
+                "retries": res.retries,
             }
             tools_called = [c.name for m in res.messages for c in m.tool_calls]
         except LLMError as exc:

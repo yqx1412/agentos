@@ -157,6 +157,51 @@ Results (38 tasks x 3 repeats; full write-up in `benchmarks/results/a4-planner.m
 - So the plain loop stays the default; the planner is opt-in, and the "direct" path keeps
   its overhead to one call on simple tasks.
 
+## Verification + retries (A5): the ablation
+
+Two more agent kinds build on the planner. `planner-verify` checks every finished step
+before trusting it and treats a rejected step as failed, which triggers a replan.
+`planner-verify-retry` first re-runs a rejected step up to 2 times, with the rejection
+reason in the prompt. The checks (`verifier.py`) run cheapest first:
+
+1. `text_tool_call`: the step wrote a tool call as JSON text and made no real call.
+2. `filename_as_content`: a bare file name was passed as `text`/`data`/`body`.
+3. `ungrounded`: a tool argument used a number (>= 100) that is in no tool output, in the
+   task or in an earlier step, i.e. a made-up input.
+4. `reflection`: one model call judges whether the goal was achieved and the result
+   follows from the tool outputs. An unparseable verdict counts as a pass.
+
+```powershell
+uv run agentos bench --models qwen3:8b --agents plain,planner,planner-verify,planner-verify-retry
+uv run agentos run "<task>" --agent planner-verify-retry --show-plan
+```
+
+**Headline result of Project 1**: passed runs out of 76 (38 tasks x 2 repeats). Full
+write-up: `benchmarks/results/a5-ablation.md`.
+
+| Model | plain | + planner | + verify | + retry | Tokens (plain -> +retry) |
+|---|---|---|---|---|---|
+| qwen3:8b | 62 (82%) | 63 (83%) | **69 (91%)** | 67 (88%) | 2.6k -> 5.6k |
+| qwen3:14b | 64 (84%) | **66 (87%)** | 64 (84%) | 65 (86%) | 2.2k -> 6.3k |
+| llama3.1:8b | 15 (20%) | 21 (28%) | 10 (13%) | **22 (29%)** | 1.5k -> 11.0k |
+
+- **What helps depends on the model.** qwen3:8b gains most from verification (+4 tasks,
+  none lost), mainly the check that catches `word_frequency(text="essay.txt")`. qwen3:14b
+  makes few mistakes the checks can see, so verification only adds cost, and the planner
+  alone is its best setup.
+- **Verification without retries can hurt.** llama3.1:8b writes tool calls as text. The
+  verifier rejects that correctly, but replanning just produces more steps that get
+  rejected the same way, so its score drops to 13%. Retries feed the rejection reason back,
+  and llama often makes the real call on the next try (+9 tasks), reaching 29%. That's the
+  best llama result so far, at 7x the tokens.
+- **The first version of the verifier made things worse** (qwen3:14b 36 -> 31). The traces
+  showed false rejections: reflection couldn't see earlier steps, and prose mentions
+  counted as text calls. They also showed impossible planned steps and replans lost to
+  stale dependencies. The write-up lists all five fixes.
+- **Known gap:** a file written with malformed contents (escaped JSON) passes, because
+  reflection is the same model grading itself. A check that written `.json` files parse is
+  the obvious next step.
+
 ## Architecture
 
 | Module | Role |
@@ -166,12 +211,13 @@ Results (38 tasks x 3 repeats; full write-up in `benchmarks/results/a4-planner.m
 | `builtin_tools.py` | `read_file`, `write_file` (confined to the workspace), `calculator` (AST-based, no `eval`) |
 | `agent.py` | The loop: model -> tool calls -> results fed back -> repeat, capped by `max_steps`; `Tracer` |
 | `planner.py` | `Planner`: JSON plan -> validated task graph (`Plan`, `Step`), revision after a failed step |
-| `executor.py` | `PlanningAgent`: direct / planned / fallback modes, step prompts, replanning, synthesis |
+| `executor.py` | `PlanningAgent`: direct / planned / fallback modes, step prompts, replanning, synthesis, verify + retry |
+| `verifier.py` | `Verifier`: text-call, file-name-as-content and ungrounded-number checks, then reflection |
 | `config.py` | `agentos.toml` loading and validation, placeholder expansion |
 | `mcp_client.py` | `MCPManager`: stdio connections on a background asyncio loop, MCP tools -> `Tool`s |
 | `mcp_servers/textkit.py` | Example MCP server: `text_stats`, `word_frequency`, `find_lines` |
 | `bench/` | Benchmark: `tasks.py` (YAML schema), `checks.py`, `runner.py`, `report.py` |
-| `cli.py` | `agentos run [--agent planner]`, `agentos tools`, `agentos bench [--agents plain,planner]` |
+| `cli.py` | `agentos run [--agent KIND]`, `agentos tools`, `agentos bench [--agents KIND,...]` |
 
 A malformed tool call (unknown tool, invalid JSON, missing or mistyped arguments) or a tool
 exception comes back to the model as an `ERROR: ...` tool message so it can correct itself.

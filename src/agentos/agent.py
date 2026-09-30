@@ -51,6 +51,8 @@ class AgentResult:
     plan: list[dict[str, Any]] | None = None
     replans: int = 0
     mode: str = "plain"
+    rejections: int = 0  # step results the verifier rejected (A5)
+    retries: int = 0  # steps re-run with the verifier's feedback (A5)
 
 
 class Agent:
