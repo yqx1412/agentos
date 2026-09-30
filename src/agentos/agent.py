@@ -18,7 +18,7 @@ You are AgentOS, an agent that completes tasks by calling tools.
 - If a tool returns an ERROR, read it, fix the call and try again.
 - When the task is complete, reply with a short final answer and no tool calls."""
 
-StopReason = Literal["final_answer", "max_steps"]
+StopReason = Literal["final_answer", "max_steps", "plan_failed"]
 
 
 class Tracer:
@@ -47,6 +47,10 @@ class AgentResult:
     prompt_tokens: int
     completion_tokens: int
     messages: list[Message] = field(repr=False)
+    # Set by PlanningAgent only.
+    plan: list[dict[str, Any]] | None = None
+    replans: int = 0
+    mode: str = "plain"
 
 
 class Agent:

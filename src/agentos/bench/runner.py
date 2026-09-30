@@ -25,11 +25,13 @@ from agentos.bench.checks import Outcome
 from agentos.bench.tasks import Task
 from agentos.builtin_tools import builtin_tools
 from agentos.config import AgentOSConfig, ConfigError
+from agentos.executor import PlanningAgent
 from agentos.llm import LLM, LLMError
 from agentos.mcp_client import MCPError, MCPManager
 from agentos.tools import ToolRegistry
 
 LLMFactory = Callable[[str], LLM]
+AGENT_KINDS = ("plain", "planner")
 Progress = Callable[["TaskResult", int, int], None]
 
 
@@ -50,6 +52,11 @@ class TaskResult(BaseModel):
     seconds: float = 0.0
     answer: str = ""
     trace: str | None = None
+    agent: str = "plain"
+    # PlanningAgent only: plain / direct / planned / fallback, plan size, replans.
+    mode: str = "plain"
+    plan_steps: int = 0
+    replans: int = 0
 
 
 def check_servers(tasks: list[Task], config: AgentOSConfig) -> None:
@@ -76,6 +83,7 @@ def run_task(
     repeat: int = 0,
     trace_path: Path | None = None,
     mcp_log_path: Path | None = None,
+    agent_kind: str = "plain",
 ) -> TaskResult:
     with tempfile.TemporaryDirectory(prefix="agentos-bench-") as tmp:
         # Nest the workspace so a "../x" escape attempt lands inside our temp dir.
@@ -93,7 +101,12 @@ def run_task(
         try:
             with MCPManager(servers, errlog=log) as mcp:
                 registry = ToolRegistry([*builtin_tools(workspace), *mcp.tools()])
-                agent = Agent(llm, registry, max_steps=task.max_steps, tracer=Tracer(trace_path))
+                tracer = Tracer(trace_path)
+                agent: Agent | PlanningAgent
+                if agent_kind == "planner":
+                    agent = PlanningAgent(llm, registry, max_steps=task.max_steps, tracer=tracer)
+                else:
+                    agent = Agent(llm, registry, max_steps=task.max_steps, tracer=tracer)
                 res = agent.run(task.prompt)
             stop_reason, answer = res.stop_reason, res.answer
             stats = {
@@ -102,6 +115,9 @@ def run_task(
                 "tool_errors": res.tool_errors,
                 "prompt_tokens": res.prompt_tokens,
                 "completion_tokens": res.completion_tokens,
+                "mode": res.mode,
+                "plan_steps": len(res.plan or []),
+                "replans": res.replans,
             }
             tools_called = [c.name for m in res.messages for c in m.tool_calls]
         except LLMError as exc:
@@ -132,6 +148,7 @@ def run_task(
         seconds=round(seconds, 2),
         answer=answer,
         trace=str(trace_path) if trace_path else None,
+        agent=agent_kind,
         **stats,
     )
 
@@ -165,8 +182,16 @@ def run_bench(
     repeats: int = 1,
     settings: dict[str, Any] | None = None,
     progress: Progress | None = None,
+    agents: list[str] | None = None,
 ) -> list[TaskResult]:
-    """Run every task ``repeats`` times per model. Results stream to ``results.jsonl``."""
+    """Run every task ``repeats`` times per model and agent kind (``plain``/``planner``).
+
+    Results stream to ``results.jsonl``.
+    """
+    agents = agents or ["plain"]
+    unknown = sorted(set(agents) - set(AGENT_KINDS))
+    if unknown:
+        raise ConfigError(f"unknown agent kinds {unknown}; choose from {list(AGENT_KINDS)}")
     check_servers(tasks, config)
     out_dir.mkdir(parents=True, exist_ok=True)
     meta = {
@@ -174,6 +199,7 @@ def run_bench(
         "agentos_version": __version__,
         "git_sha": _git_sha(),
         "models": models,
+        "agents": agents,
         "tasks": len(tasks),
         "repeats": repeats,
         "settings": settings or {},
@@ -181,7 +207,7 @@ def run_bench(
     (out_dir / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
     results: list[TaskResult] = []
-    total = len(models) * len(tasks) * repeats
+    total = len(models) * len(agents) * len(tasks) * repeats
     with (out_dir / "results.jsonl").open("a", encoding="utf-8") as sink:
         for model in models:
             llm = llm_factory(model)
@@ -189,23 +215,25 @@ def run_bench(
             try:
                 if hasattr(llm, "warmup"):
                     llm.warmup()
-                for task in tasks:
-                    for r in range(repeats):
-                        suffix = f"-r{r}" if repeats > 1 else ""
-                        trace = out_dir / "traces" / safe / f"{task.id}{suffix}.jsonl"
-                        result = run_task(
-                            llm,
-                            task,
-                            config=config,
-                            repeat=r,
-                            trace_path=trace,
-                            mcp_log_path=out_dir / "mcp.log" if task.servers else None,
-                        )
-                        results.append(result)
-                        sink.write(result.model_dump_json() + "\n")
-                        sink.flush()
-                        if progress:
-                            progress(result, len(results), total)
+                for kind in agents:
+                    for task in tasks:
+                        for r in range(repeats):
+                            suffix = f"-r{r}" if repeats > 1 else ""
+                            trace = out_dir / "traces" / safe / kind / f"{task.id}{suffix}.jsonl"
+                            result = run_task(
+                                llm,
+                                task,
+                                config=config,
+                                repeat=r,
+                                trace_path=trace,
+                                mcp_log_path=out_dir / "mcp.log" if task.servers else None,
+                                agent_kind=kind,
+                            )
+                            results.append(result)
+                            sink.write(result.model_dump_json() + "\n")
+                            sink.flush()
+                            if progress:
+                                progress(result, len(results), total)
             finally:
                 # Free VRAM before the next model: two large models resident at once made
                 # Ollama stall for minutes on this 16 GB GPU.

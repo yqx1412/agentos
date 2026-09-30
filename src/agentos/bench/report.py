@@ -12,10 +12,17 @@ def _pct(passed: int, n: int) -> str:
     return f"{100 * passed / n:.0f}%" if n else "-"
 
 
+def _labeler(results: list[TaskResult]):
+    """Row label: the model, plus the agent kind when a run compares several."""
+    several = len({r.agent for r in results}) > 1
+    return (lambda r: f"{r.model} / {r.agent}") if several else (lambda r: r.model)
+
+
 def summary_table(results: list[TaskResult]) -> str:
+    label = _labeler(results)
     by_model: dict[str, list[TaskResult]] = defaultdict(list)
     for r in results:
-        by_model[r.model].append(r)
+        by_model[label(r)].append(r)
     lines = [
         "| Model | Passed | Success | Avg steps | Avg tool calls | Tool errors | "
         "Avg tokens | Avg time | Backend errors | Hit max steps |",
@@ -37,11 +44,12 @@ def summary_table(results: list[TaskResult]) -> str:
 
 
 def category_table(results: list[TaskResult]) -> str:
-    models = list(dict.fromkeys(r.model for r in results))
+    label = _labeler(results)
+    models = list(dict.fromkeys(label(r) for r in results))
     categories = list(dict.fromkeys(r.category for r in results))
     cell: dict[tuple[str, str], list[bool]] = defaultdict(list)
     for r in results:
-        cell[(r.category, r.model)].append(r.passed)
+        cell[(r.category, label(r))].append(r.passed)
     lines = [
         "| Category | Tasks | " + " | ".join(models) + " |",
         "|---|---|" + "---|" * len(models),
@@ -54,6 +62,7 @@ def category_table(results: list[TaskResult]) -> str:
 
 
 def failures(results: list[TaskResult]) -> str:
+    label = _labeler(results)
     lines = []
     for r in results:
         if r.passed:
@@ -64,8 +73,33 @@ def failures(results: list[TaskResult]) -> str:
             why = f"stopped: {r.stop_reason}"
         else:
             why = "; ".join(c["detail"] for c in r.checks if not c["ok"])
-        lines.append(f"- `{r.model}` **{r.task_id}**: {why}")
+        lines.append(f"- `{label(r)}` **{r.task_id}**: {why}")
     return "\n".join(lines) or "_none_"
+
+
+def planner_table(results: list[TaskResult]) -> str:
+    """How the planner handled each task: direct (1-step plan), planned, fallback."""
+    rs = [r for r in results if r.agent == "planner"]
+    if not rs:
+        return ""
+    by_model: dict[str, list[TaskResult]] = defaultdict(list)
+    for r in rs:
+        by_model[r.model].append(r)
+    lines = [
+        "| Model | Direct (pass) | Planned (pass) | Fallback (pass) | Avg plan steps | Replans |",
+        "|---|---|---|---|---|---|",
+    ]
+    for model, group in by_model.items():
+        cells = []
+        for mode in ("direct", "planned", "fallback"):
+            g = [r for r in group if r.mode == mode]
+            cells.append(f"{len(g)} ({sum(r.passed for r in g)})")
+        planned = [r for r in group if r.mode == "planned"]
+        avg = mean(r.plan_steps for r in planned) if planned else 0.0
+        lines.append(
+            f"| {model} | {' | '.join(cells)} | {avg:.1f} | {sum(r.replans for r in group)} |"
+        )
+    return "\n".join(lines)
 
 
 def render_markdown(results: list[TaskResult], meta: dict | None = None) -> str:
@@ -86,6 +120,10 @@ def render_markdown(results: list[TaskResult], meta: dict | None = None) -> str:
         "",
         category_table(results),
         "",
+    ]
+    if planner := planner_table(results):
+        parts += ["## Planner modes", "", planner, ""]
+    parts += [
         "## Failures",
         "",
         failures(results),
