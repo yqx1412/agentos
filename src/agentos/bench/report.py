@@ -78,18 +78,19 @@ def failures(results: list[TaskResult]) -> str:
 
 
 def planner_table(results: list[TaskResult]) -> str:
-    """How the planner handled each task: direct (1-step plan), planned, fallback."""
-    rs = [r for r in results if r.agent == "planner"]
+    """How each planner kind handled tasks: direct (1-step plan), planned, fallback."""
+    rs = [r for r in results if r.agent != "plain"]
     if not rs:
         return ""
-    by_model: dict[str, list[TaskResult]] = defaultdict(list)
+    by_kind: dict[str, list[TaskResult]] = defaultdict(list)
     for r in rs:
-        by_model[r.model].append(r)
+        by_kind[f"{r.model} / {r.agent}"].append(r)
     lines = [
-        "| Model | Direct (pass) | Planned (pass) | Fallback (pass) | Avg plan steps | Replans |",
-        "|---|---|---|---|---|---|",
+        "| Model / agent | Direct (pass) | Planned (pass) | Fallback (pass) | Avg plan steps "
+        "| Replans | Rejections | Retries |",
+        "|---|---|---|---|---|---|---|---|",
     ]
-    for model, group in by_model.items():
+    for label, group in by_kind.items():
         cells = []
         for mode in ("direct", "planned", "fallback"):
             g = [r for r in group if r.mode == mode]
@@ -97,7 +98,8 @@ def planner_table(results: list[TaskResult]) -> str:
         planned = [r for r in group if r.mode == "planned"]
         avg = mean(r.plan_steps for r in planned) if planned else 0.0
         lines.append(
-            f"| {model} | {' | '.join(cells)} | {avg:.1f} | {sum(r.replans for r in group)} |"
+            f"| {label} | {' | '.join(cells)} | {avg:.1f} | {sum(r.replans for r in group)} "
+            f"| {sum(r.rejections for r in group)} | {sum(r.retries for r in group)} |"
         )
     return "\n".join(lines)
 

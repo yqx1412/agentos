@@ -13,13 +13,12 @@ from pathlib import Path
 from typing import TextIO
 
 from agentos import __version__
-from agentos.agent import Agent, Tracer
+from agentos.agent import Tracer
 from agentos.bench.report import render_markdown, summary_table
-from agentos.bench.runner import AGENT_KINDS, TaskResult, run_bench
+from agentos.bench.runner import AGENT_KINDS, TaskResult, make_agent, run_bench
 from agentos.bench.tasks import TaskError, load_tasks, select_tasks
 from agentos.builtin_tools import builtin_tools
 from agentos.config import AgentOSConfig, ConfigError, load_config
-from agentos.executor import PlanningAgent
 from agentos.llm import LLMError, OllamaLLM
 from agentos.mcp_client import MCPError, MCPManager
 from agentos.tools import ToolRegistry
@@ -54,7 +53,10 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--trace-dir", type=Path, default=Path("runs"), help="Where JSONL traces go")
     run.add_argument("--no-trace", action="store_true")
     run.add_argument(
-        "--agent", choices=AGENT_KINDS, default="plain", help="plain loop or planner (A4)"
+        "--agent",
+        choices=list(AGENT_KINDS),
+        default="plain",
+        help="plain loop, planner (A4), or planner with verification / retries (A5)",
     )
     run.add_argument("--show-plan", action="store_true", help="Print the plan to stderr")
     _add_common(run)
@@ -171,7 +173,10 @@ def _cmd_bench(args: argparse.Namespace, config: AgentOSConfig) -> int:
         "think": False,
         "timeout": args.timeout,
         "planner": "step_max_steps=8, max_replans=2, budget=2*max_steps"
-        if "planner" in agents
+        if any(a != "plain" for a in agents)
+        else None,
+        "verify": "text_tool_call + ungrounded numbers >= 100 + reflection; step_retries=2"
+        if any("verify" in a for a in agents)
         else None,
     }
 
@@ -250,12 +255,9 @@ def _cmd_run(args: argparse.Namespace, config: AgentOSConfig, workspace: Path) -
     llm = OllamaLLM(args.model, args.ollama_url, think=args.think, num_ctx=args.num_ctx)
     try:
         with _open_log(log_path) as log, _registry(config, workspace, log) as (registry, _):
-            tracer = Tracer(trace_path)
-            agent: Agent | PlanningAgent
-            if args.agent == "planner":
-                agent = PlanningAgent(llm, registry, max_steps=args.max_steps, tracer=tracer)
-            else:
-                agent = Agent(llm, registry, max_steps=args.max_steps, tracer=tracer)
+            agent = make_agent(
+                args.agent, llm, registry, max_steps=args.max_steps, tracer=Tracer(trace_path)
+            )
             result = agent.run(args.task)
     except (LLMError, MCPError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -264,7 +266,11 @@ def _cmd_run(args: argparse.Namespace, config: AgentOSConfig, workspace: Path) -
         llm.close()
 
     if args.show_plan and result.plan:
-        print(f"plan ({result.mode}, {result.replans} replans):", file=sys.stderr)
+        print(
+            f"plan ({result.mode}, {result.replans} replans, {result.rejections} rejections, "
+            f"{result.retries} retries):",
+            file=sys.stderr,
+        )
         for s in result.plan:
             deps = f" after {s['depends_on']}" if s["depends_on"] else ""
             res = f" -> {s['result']}" if s.get("result") else ""

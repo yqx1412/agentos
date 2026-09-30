@@ -25,6 +25,7 @@ from agentos.agent import DEFAULT_SYSTEM_PROMPT, Agent, AgentResult, StopReason,
 from agentos.llm import LLM, Message
 from agentos.planner import Plan, PlanError, Planner, Step
 from agentos.tools import ToolRegistry
+from agentos.verifier import Verifier
 
 STEP_PROMPT = """\
 Overall task: {task}
@@ -48,6 +49,12 @@ SYNTH_SYSTEM_PROMPT = """\
 You write the final reply for a task that an agent has already carried out step by step.
 Use only the step results below; do not invent anything. Reply in one or two short
 sentences and include every value the task asks for."""
+
+RETRY_NOTE = """\
+{prompt}
+
+A previous attempt at this was checked and REJECTED: {reason}
+Do it again, fixing that problem. Files written by the previous attempt are still there."""
 
 
 def _short(text: str, limit: int = 600) -> str:
@@ -75,6 +82,14 @@ def _observations(messages: list[Message]) -> str:
     return "\n".join(parts)
 
 
+def _tool_outputs(messages: list[Message]) -> str:
+    """Only what the tools returned, uncapped: the verifier's evidence. Never the calls'
+    arguments, which may be made up and must not vouch for themselves."""
+    return "\n".join(
+        m.content for m in messages if m.role == "tool" and not m.content.startswith("ERROR:")
+    )
+
+
 class PlanningAgent:
     """Drop-in alternative to :class:`Agent` with the same ``run(task) -> AgentResult``.
 
@@ -92,18 +107,24 @@ class PlanningAgent:
         step_max_steps: int = 8,
         max_replans: int = 2,
         direct_single_step: bool = True,
+        verify: bool = False,
+        step_retries: int = 0,
         tracer: Tracer | None = None,
     ) -> None:
         if max_steps < 1 or step_max_steps < 1:
             raise ValueError("max_steps and step_max_steps must be >= 1")
+        if step_retries and not verify:
+            raise ValueError("step_retries needs verify=True: retries react to rejections")
         self.llm = llm
         self.tools = tools
         self.max_steps = max_steps
         self.step_max_steps = step_max_steps
         self.max_replans = max_replans
         self.direct_single_step = direct_single_step
+        self.step_retries = step_retries
         self.tracer = tracer or Tracer(None)
         self.planner = Planner(llm, tools)
+        self.verifier = Verifier(llm, tools) if verify else None
 
     def run(self, task: str) -> AgentResult:
         self.tracer.emit("plan_start", model=self.llm.model, task=task)
@@ -118,7 +139,10 @@ class PlanningAgent:
             "plan", attempts=pr.attempts, steps=[s.model_dump() for s in pr.plan.steps]
         )
         if len(pr.plan.steps) == 1 and self.direct_single_step:
-            return self._plain(task, mode="direct", plan=pr.plan, extra_tokens=tokens)
+            if self.verifier is None:
+                return self._plain(task, mode="direct", plan=pr.plan, extra_tokens=tokens)
+            # Same run as _plain, but through the step machinery so it gets verified.
+            return self._execute(task, pr.plan, tokens, direct=True)
         return self._execute(task, pr.plan, tokens)
 
     # -- modes -------------------------------------------------------------------------
@@ -139,60 +163,121 @@ class PlanningAgent:
             res.plan = [{**s.model_dump(), "round": 0, "status": mode} for s in plan.steps]
         return res
 
-    def _execute(self, task: str, plan: Plan, tokens: tuple[int, int]) -> AgentResult:
+    def _execute(
+        self, task: str, plan: Plan, tokens: tuple[int, int], *, direct: bool = False
+    ) -> AgentResult:
+        """Run the plan. ``direct``: a verified 1-step plan whose step is the task itself.
+
+        A direct step keeps the plain loop's semantics: its prompt is the original task, it
+        gets ``max_steps`` turns, running out of turns ends the run with ``max_steps`` and a
+        "FAILED:" reply is a legitimate final answer. Only a verifier rejection changes it.
+        """
         p_tok, c_tok = tokens
-        n_steps = n_calls = n_errors = replans = 0
+        n_steps = n_calls = n_errors = replans = rejections = retries = 0
         budget = 2 * self.max_steps
         messages: list[Message] = []
         finished: dict[int, tuple[str, str]] = {}
         observations: dict[int, str] = {}
+        step_outputs: dict[int, str] = {}  # verifier evidence: what tools returned, only
         records: list[dict[str, Any]] = [
             {**s.model_dump(), "round": 0, "status": "pending"} for s in plan.steps
         ]
         queue: list[Step] = plan.order()
         stop: StopReason | None = None
-        answer = ""
+        answer = direct_answer = ""
 
         while queue:
             step = queue.pop(0)
             record = next(r for r in records if r["id"] == step.id and r["status"] == "pending")
+            is_direct = direct and replans == 0
             if budget <= 0:
                 stop, answer = "max_steps", "step budget exhausted"
                 break
 
             self.tracer.emit("step_start", step=step.id, goal=step.goal)
-            agent = Agent(
-                self.llm,
-                self.tools,
-                system_prompt=DEFAULT_SYSTEM_PROMPT,
-                max_steps=min(self.step_max_steps, budget),
-                tracer=self.tracer,
+            base_prompt = (
+                task if is_direct else self._step_prompt(task, step, finished, observations)
             )
-            res = agent.run(self._step_prompt(task, step, finished, observations))
-            budget -= res.steps
-            n_steps += res.steps
-            n_calls += res.tool_calls
-            n_errors += res.tool_errors
-            p_tok += res.prompt_tokens
-            c_tok += res.completion_tokens
-            messages += res.messages
+            prompt, attempt, seen_outputs = base_prompt, 0, ""
+            while True:
+                agent = Agent(
+                    self.llm,
+                    self.tools,
+                    system_prompt=DEFAULT_SYSTEM_PROMPT,
+                    max_steps=min(self.max_steps if is_direct else self.step_max_steps, budget),
+                    tracer=self.tracer,
+                )
+                res = agent.run(prompt)
+                budget -= res.steps
+                n_steps += res.steps
+                n_calls += res.tool_calls
+                n_errors += res.tool_errors
+                p_tok += res.prompt_tokens
+                c_tok += res.completion_tokens
+                messages += res.messages
+                result = res.answer.strip()
 
-            result = res.answer.strip()
-            failed = res.stop_reason != "final_answer" or result.upper().startswith("FAILED")
+                if is_direct and res.stop_reason != "final_answer":
+                    break  # plain-loop semantics: out of turns ends the run below
+                failed = res.stop_reason != "final_answer" or (
+                    not is_direct and result.upper().startswith("FAILED")
+                )
+                reason = (
+                    f"ran out of turns ({res.stop_reason})"
+                    if res.stop_reason != "final_answer"
+                    else _short(result.split(":", 1)[-1], 300)
+                )
+                if failed or self.verifier is None:
+                    break
+
+                evidence = "\n".join([*step_outputs.values(), seen_outputs])
+                verdict = self.verifier.check(
+                    task=task,
+                    goal=task if is_direct else step.goal,
+                    evidence=evidence,
+                    messages=res.messages,
+                    answer=result,
+                    context=self._finished_block(finished, observations),
+                )
+                p_tok += verdict.prompt_tokens
+                c_tok += verdict.completion_tokens
+                self.tracer.emit(
+                    "verify", step=step.id, attempt=attempt, ok=verdict.ok,
+                    check=verdict.check, reason=verdict.reason,
+                )  # fmt: skip
+                if verdict.ok:
+                    break
+                rejections += 1
+                record.setdefault("rejections", []).append(f"{verdict.check}: {verdict.reason}")
+                reason = f"a checker rejected the result ({verdict.check}): {verdict.reason}"
+                if attempt >= self.step_retries or budget <= 0:
+                    failed = True
+                    break
+                attempt += 1
+                retries += 1
+                # Only what the tools RETURNED is evidence; the rejected attempt's own
+                # arguments are exactly what is under suspicion.
+                seen_outputs += "\n" + _tool_outputs(res.messages)
+                prompt = RETRY_NOTE.format(prompt=base_prompt, reason=verdict.reason)
+                self.tracer.emit("step_retry", step=step.id, attempt=attempt)
+
             record["result"] = _short(result, 300)
+            record["attempts"] = attempt + 1
+            if is_direct and res.stop_reason != "final_answer":
+                record["status"] = "failed"
+                stop, answer = res.stop_reason, result
+                break
             self.tracer.emit("step_end", step=step.id, ok=not failed, result=result)
             if not failed:
                 record["status"] = "done"
                 finished[step.id] = (step.goal, _short(result))
                 observations[step.id] = _observations(res.messages)
+                step_outputs[step.id] = _tool_outputs(res.messages)
+                if is_direct:
+                    direct_answer = result
                 continue
 
             record["status"] = "failed"
-            reason = (
-                f"ran out of turns ({res.stop_reason})"
-                if res.stop_reason != "final_answer"
-                else _short(result.split(":", 1)[-1], 300)
-            )
             for r in records:  # the rest of the old plan is superseded
                 if r["status"] == "pending":
                     r["status"] = "dropped"
@@ -215,9 +300,12 @@ class PlanningAgent:
             queue = pr.plan.order()
 
         if stop is None:
-            answer, sp, sc = self._synthesize(task, finished)
-            p_tok += sp
-            c_tok += sc
+            if direct and replans == 0:
+                answer = direct_answer  # the plain loop's own final answer, as in _plain
+            else:
+                answer, sp, sc = self._synthesize(task, finished)
+                p_tok += sp
+                c_tok += sc
             stop = "final_answer"
 
         result = AgentResult(
@@ -231,7 +319,9 @@ class PlanningAgent:
             messages=messages,
             plan=records,
             replans=replans,
-            mode="planned",
+            mode="direct" if direct else "planned",
+            rejections=rejections,
+            retries=retries,
         )
         self.tracer.emit(
             "plan_end",
@@ -239,6 +329,8 @@ class PlanningAgent:
             stop_reason=stop,
             steps=n_steps,
             replans=replans,
+            rejections=rejections,
+            retries=retries,
             prompt_tokens=p_tok,
             completion_tokens=c_tok,
         )
@@ -247,22 +339,28 @@ class PlanningAgent:
     # -- prompts -----------------------------------------------------------------------
 
     @staticmethod
+    def _finished_block(finished: dict[int, tuple[str, str]], observations: dict[int, str]) -> str:
+        blocks = []
+        for i, (g, r) in finished.items():
+            block = f"- step {i} ({g}): {r}"
+            if observations.get(i):
+                block += "\n  tool outputs:\n" + observations[i]
+            blocks.append(block)
+        return "\n".join(blocks)
+
+    @classmethod
     def _step_prompt(
+        cls,
         task: str,
         step: Step,
         finished: dict[int, tuple[str, str]],
         observations: dict[int, str],
     ) -> str:
-        if finished:
-            blocks = []
-            for i, (g, r) in finished.items():
-                block = f"- step {i} ({g}): {r}"
-                if observations.get(i):
-                    block += "\n  tool outputs:\n" + observations[i]
-                blocks.append(block)
-            done = "\nFinished steps:\n" + "\n".join(blocks) + "\n"
-        else:
-            done = ""
+        done = (
+            f"\nFinished steps:\n{cls._finished_block(finished, observations)}\n"
+            if finished
+            else ""
+        )
         return STEP_PROMPT.format(task=task, done=done, step_id=step.id, goal=step.goal)
 
     def _synthesize(self, task: str, finished: dict[int, tuple[str, str]]) -> tuple[str, int, int]:

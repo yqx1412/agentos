@@ -111,6 +111,18 @@ def test_planner_prompt_lists_the_tools(tmp_path: Path) -> None:
     assert '{"steps": [{"id": 1' in system  # format braces survived .format()
 
 
+def test_revised_plan_may_keep_a_dependency_on_the_failed_step(tmp_path: Path) -> None:
+    llm = ScriptedLLM([plan_reply((2, "read x another way", [1]), (3, "use it", [2]))])
+    result = Planner(llm, registry(tmp_path)).revise("task", {}, step_id=1, reason="no file")
+    assert [(s.id, s.depends_on) for s in result.plan.steps] == [(2, []), (3, [2])]
+    assert result.attempts == 1
+
+
+def test_initial_plan_still_rejects_unknown_dependencies(tmp_path: Path) -> None:
+    llm = ScriptedLLM([plan_reply((2, "x", [1])), plan_reply((1, "x", []))])
+    assert Planner(llm, registry(tmp_path)).plan("task").attempts == 2
+
+
 # -- PlanningAgent ------------------------------------------------------------------------
 
 
