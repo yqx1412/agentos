@@ -1,5 +1,33 @@
 # A4: planner vs. plain loop
 
+## Repeated run: 38 tasks x 3 repeats (headline)
+
+Run `20260930-215230` on commit `0c8cbc8`, both agents in one pass, same settings as below.
+
+| Model | Plain | Planner | Per repeat (plain / planner) | Avg tokens | Avg time |
+|---|---|---|---|---|---|
+| qwen3:8b | 95/114 (83%) | 101/114 (89%) | 32, 31, 32 / 33, 34, 34 | 2,807 -> 4,919 | 2.0 s -> 4.0 s |
+| qwen3:14b | 99/114 (87%) | 108/114 (95%) | 33, 33, 33 / 36, 36, 36 | 2,220 -> 4,488 | 3.0 s -> 6.9 s |
+| llama3.1:8b | 24/114 (21%) | 29/114 (25%) | 8, 8, 8 / 11, 9, 9 | 1,308 -> 3,758 | 2.5 s -> 6.2 s |
+
+At temperature 0 the repeats barely differ: almost every task passes 0/3 or 3/3 times.
+So repeats confirm the single-run numbers were not luck of one run, but the real sample is
+the 38 tasks. Tasks where the two agents differ (pass count out of 3):
+
+| Model | Planner better | Planner worse |
+|---|---|---|
+| qwen3:8b | ch-csv-to-json 0->3, fo-overwrite 0->3, ma-sort 0->3, mcp-lecture-summary 2->3 | ma-max-csv 3->2, mcp-top-word 3->0 |
+| qwen3:14b | ch-combine 0->3, fo-overwrite 0->3, ma-sqrt-cube 0->3, mcp-find-todo 0->3 | mcp-find-similar 3->0 |
+| llama3.1:8b | fo-append 0->3, fo-uppercase 0->3, ma-time 0->3, ch-combine 0->1, fo-wordcount 0->1 | fo-json-array 3->0, ma-sqrt-cube 3->0 |
+
+The planner wins more tasks than it loses on every model (13 vs 5 in total), and
+`fo-overwrite`, where both qwen models repeated a failing calculator call in the plain
+loop, flips 0->3 for both. But per model a sign test over the differing tasks gives
+p = 0.69 / 0.38 / 0.45, and pooled p ~ 0.1: consistent in direction, not yet
+statistically solid with 38 tasks. The cost is solid: ~1.8-2.9x tokens, ~2-2.5x time.
+
+## Single run (first measurement)
+
 38 tasks, 1 run each, temperature 0, thinking off, `num_ctx` 8192, `num_predict` 2048,
 RTX 5060 Ti 16 GB. Planner settings: `step_max_steps=8`, `max_replans=2`, total budget
 `2 * max_steps` model turns.

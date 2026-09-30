@@ -137,17 +137,20 @@ wrote literal `\n` into `report.txt` (and qwen3:8b wrote escaped, invalid `total
 qwen3:8b with the planner made up the CSV totals in step 2 without reading the files,
 which is what A5's verification is for.
 
-Results (38 tasks, 1 run each; full write-up in `benchmarks/results/a4-planner.md`):
+Results (38 tasks x 3 repeats; full write-up in `benchmarks/results/a4-planner.md`):
 
 | Model | Plain | Planner | Avg tokens | Avg time |
 |---|---|---|---|---|
-| qwen3:8b | 32/38 (84%) | 34/38 (89%) | 2,667 -> 4,741 | 2.2 s -> 3.9 s |
-| qwen3:14b | 33/38 (87%) | 35/38 (92%) | 2,211 -> 4,599 | 3.0 s -> 7.1 s |
-| llama3.1:8b | 8/38 (21%) | 9/38 (24%) | 1,227 -> 3,768 | 2.5 s -> 6.2 s |
+| qwen3:8b | 95/114 (83%) | 101/114 (89%) | 2,807 -> 4,919 | 2.0 s -> 4.0 s |
+| qwen3:14b | 99/114 (87%) | 108/114 (95%) | 2,220 -> 4,488 | 3.0 s -> 6.9 s |
+| llama3.1:8b | 24/114 (21%) | 29/114 (25%) | 1,308 -> 3,758 | 2.5 s -> 6.2 s |
 
-- The planner helps the qwen models most on chaining (8 -> 9 of 9 for both), and qwen3:14b's
-  tool errors drop from 18 to 3. The gain is 1-2 tasks on one run, so it needs
-  `--repeats` to be sure; the ~2x cost in tokens and time is certain.
+- The planner wins more tasks than it loses on every model (13 flips its way vs 5 against,
+  pooled sign test p ~ 0.1). At temperature 0 the repeats are nearly identical, so the
+  sample that matters is 38 tasks: consistent, not yet conclusive. The ~2x cost in tokens
+  and time is certain.
+- It fixes the "repeat the same failing call" failure: `fo-overwrite` goes 0/3 -> 3/3 for
+  both qwen models. qwen3:14b's tool errors drop from 18 to 3 per 38 tasks.
 - The first version made things worse (qwen3:8b 26/38): it over-planned trivial tasks and
   passed only summaries between steps, losing file contents. The write-up has the details.
 - It does not help llama3.1:8b, whose problem is emitting tool calls as text.
