@@ -6,6 +6,9 @@ Local-first agent runtime: planner/executor, MCP tools, memory and benchmarks.
 
 Part of the local AI agent ecosystem; see `../ROADMAP.md`.
 
+New here? [`docs/overview-a1-a7.md`](docs/overview-a1-a7.md) explains how AgentOS was built,
+milestone by milestone, in plain language with the measured results.
+
 ## Usage
 
 Requires [Ollama](https://ollama.com) running locally with a tool-capable model pulled.
