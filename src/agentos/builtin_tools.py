@@ -12,6 +12,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from agentos.sandbox import is_protected
 from agentos.tools import Tool, ToolError
 
 MAX_READ_BYTES = 200_000
@@ -53,6 +54,8 @@ def file_tools(workspace: Path) -> list[Tool]:
 
     def write_file(args: WriteFileArgs) -> str:
         p = _resolve(workspace, args.path)
+        if is_protected(p, workspace):
+            raise ToolError(f"path {args.path!r} is inside a protected directory (.git)")
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(args.content, encoding="utf-8")
         return f"wrote {len(args.content)} characters to {args.path}"
@@ -65,6 +68,7 @@ def file_tools(workspace: Path) -> list[Tool]:
             "Missing parent directories are created automatically.",
             WriteFileArgs,
             write_file,
+            permission="write",
         ),
     ]
 

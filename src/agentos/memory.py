@@ -327,6 +327,7 @@ def memory_tools(store: MemoryStore) -> list[Tool]:
             RememberArgs,
             remember,
             source="memory",
+            permission="write",
         ),
         Tool(
             "recall",
@@ -341,6 +342,7 @@ def memory_tools(store: MemoryStore) -> list[Tool]:
             ForgetArgs,
             forget,
             source="memory",
+            permission="write",
         ),
     ]
 

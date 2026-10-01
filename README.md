@@ -241,18 +241,69 @@ old output clipped to its first and last 300 characters. A model-written summary
 first and rejected: qwen3:8b "summarized" file reads it had never been shown. Details in
 `benchmarks/results/a6-memory.md`.
 
+## Sandboxing and permissions (A7)
+
+Every tool has a permission level: `read`, `write` or `dangerous`. Calls at or below
+`--allow` (default `write`) run directly; higher ones show the exact call and wait for
+`y/N`, and are denied when there is no terminal to ask (`--no-prompt` forces that).
+
+| Level | Tools |
+|---|---|
+| read | `read_file`, `calculator`, `recall` |
+| write | `write_file`, `remember`, `forget`, MCP tools (per server: `permission = "..."`) |
+| dangerous | `run_python`, `run_command` (only with `--sandbox`) |
+
+```powershell
+uv run agentos run "Use Python to compute fib(30) and write it to fib.txt." --sandbox
+uv run agentos tools --sandbox      # lists each tool's permission
+```
+
+What a sandboxed call is up against, outermost first:
+
+1. **Approval** by a human for every `dangerous` call.
+2. **OS limits:** timeout, memory cap and process cap, and the whole process tree is
+   stopped at the end of the call. Windows uses a Job Object; Linux uses rlimits and a
+   process group.
+3. **`run_python`:** an audit hook installed before the agent's code runs refuses
+   subprocesses, network, `ctypes` and other native modules, and file access outside the
+   workspace. It runs on the base interpreter, standard library only, and the OS allows
+   it no child process at all.
+4. **`run_command`:** argv lists only, never a shell. Allowlisted programs only (`[sandbox]
+   allowed_commands`, default `git`), never `.bat`/`.cmd` files. `git` gets a fixed set of
+   local subcommands, no `-c` or global options, and the user's git config is ignored.
+   Path-like arguments must stay inside the workspace.
+5. **Clean environment:** no API keys or tokens from the parent's environment.
+
+`.git` is protected from every tool, `write_file` included, because writing `.git/config`
+turns "may run git" into "may run anything".
+
+`tests/test_sandbox.py` is the escape suite (57 cases): reading, writing, renaming or
+deleting outside the workspace, `..`, absolute paths and `chdir`; `subprocess`,
+`os.system`, `exec`, `ctypes`, sockets and `urllib`; reaching blocked modules through
+`importlib` or `sys.modules`; installing a second audit hook; memory bombs, infinite loops,
+output floods and grandchild processes; leaked environment secrets; git config tricks;
+and dangerous calls without approval. All are blocked.
+
+**Limits, stated plainly:** an audit hook is not a security boundary (CPython says so),
+which is why native-code modules are blocked outright rather than watched. Reads of the
+Python installation are allowed, because imports need them. On Windows a child exists for
+a moment before it is placed in its Job Object. This contains a confused or careless
+model; it is not a container. The approval step is what stands between a hostile
+instruction and the machine.
+
 ## Architecture
 
 | Module | Role |
 |---|---|
 | `llm.py` | Provider-neutral `Message`/`ToolCall` types, `LLM` protocol, `OllamaLLM` |
-| `tools.py` | `Tool` + `ToolRegistry`: Pydantic arg models become JSON schemas; `execute()` never raises |
+| `tools.py` | `Tool` + `ToolRegistry`: Pydantic arg models become JSON schemas; `execute()` never raises; `Policy` (permission levels, approval) |
 | `builtin_tools.py` | `read_file`, `write_file` (confined to the workspace), `calculator` (AST-based, no `eval`) |
 | `agent.py` | The loop: model -> tool calls -> results fed back -> repeat, capped by `max_steps`; `Tracer` |
 | `planner.py` | `Planner`: JSON plan -> validated task graph (`Plan`, `Step`), revision after a failed step |
 | `executor.py` | `PlanningAgent`: direct / planned / fallback modes, step prompts, replanning, synthesis, verify + retry |
 | `verifier.py` | `Verifier`: text-call, file-name-as-content and ungrounded-number checks, then reflection |
 | `memory.py` | `MemoryStore` (SQLite + FTS5 facts and episodes), memory tools, `MemoryAgent`, `compact_messages` |
+| `sandbox.py` | `run_python` / `run_command` tools, command rules, limited subprocess; `_winjob.py` (Job Object), `_sandbox_boot.py` (audit hook) |
 | `config.py` | `agentos.toml` loading and validation, placeholder expansion |
 | `mcp_client.py` | `MCPManager`: stdio connections on a background asyncio loop, MCP tools -> `Tool`s |
 | `mcp_servers/textkit.py` | Example MCP server: `text_stats`, `word_frequency`, `find_lines` |

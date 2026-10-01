@@ -22,7 +22,8 @@ from agentos.config import AgentOSConfig, ConfigError, load_config
 from agentos.llm import LLMError, OllamaLLM
 from agentos.mcp_client import MCPError, MCPManager
 from agentos.memory import MemoryStore, describe
-from agentos.tools import ToolRegistry
+from agentos.sandbox import sandbox_tools
+from agentos.tools import PERMISSION_LEVELS, Policy, Tool, ToolRegistry
 
 DEFAULT_CONFIG = Path("agentos.toml")
 DEFAULT_TASKS = Path("benchmarks/tasks")
@@ -39,6 +40,19 @@ def _add_common(p: argparse.ArgumentParser) -> None:
         help=f"Config file (default: ./{DEFAULT_CONFIG} if it exists)",
     )
     p.add_argument("--no-mcp", action="store_true", help="Ignore configured MCP servers")
+    p.add_argument(
+        "--sandbox",
+        action="store_true",
+        help="Add the run_python and run_command tools (permission: dangerous)",
+    )
+    p.add_argument(
+        "--allow",
+        choices=list(PERMISSION_LEVELS),
+        default="write",
+        help="Highest permission level that runs without asking (default: write). Higher "
+        "calls are shown for a y/N answer, or denied when stdin is not a terminal",
+    )
+    p.add_argument("--no-prompt", action="store_true", help="Never ask; deny instead")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -128,19 +142,47 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _load(args: argparse.Namespace) -> AgentOSConfig:
-    if getattr(args, "no_mcp", False):
-        return AgentOSConfig()
     if args.config is not None:
-        return load_config(args.config)
-    return load_config(DEFAULT_CONFIG) if DEFAULT_CONFIG.is_file() else AgentOSConfig()
+        config = load_config(args.config)
+    else:
+        config = load_config(DEFAULT_CONFIG) if DEFAULT_CONFIG.is_file() else AgentOSConfig()
+    if getattr(args, "no_mcp", False):
+        config = config.model_copy(update={"mcp_servers": {}})
+    return config
+
+
+def ask_approval(tool: Tool, args: dict) -> bool:
+    """The human 'yes' for dangerous tools: shows the exact call, defaults to no."""
+    shown = json.dumps(args, ensure_ascii=False, indent=2)
+    if len(shown) > 3000:
+        shown = shown[:3000] + "\n  ... (truncated)"
+    print(f"\n[approval] {tool.name} ({tool.permission}) wants to run:\n{shown}", file=sys.stderr)
+    try:
+        reply = input("Allow this call? [y/N] ")
+    except EOFError:
+        return False
+    return reply.strip().lower() in ("y", "yes")
+
+
+def _policy(args: argparse.Namespace) -> Policy:
+    interactive = sys.stdin.isatty() and not getattr(args, "no_prompt", False)
+    return Policy(auto_approve=args.allow, approver=ask_approval if interactive else None)
 
 
 @contextlib.contextmanager
 def _registry(
-    config: AgentOSConfig, workspace: Path, mcp_log: TextIO
+    config: AgentOSConfig,
+    workspace: Path,
+    mcp_log: TextIO,
+    *,
+    sandbox: bool = False,
+    policy: Policy | None = None,
 ) -> Iterator[tuple[ToolRegistry, MCPManager]]:
     with MCPManager(config.enabled_servers(workspace), errlog=mcp_log) as mcp:
-        yield ToolRegistry([*builtin_tools(workspace), *mcp.tools()]), mcp
+        tools = [*builtin_tools(workspace), *mcp.tools()]
+        if sandbox:
+            tools += sandbox_tools(workspace, config.sandbox)
+        yield ToolRegistry(tools, policy=policy), mcp
 
 
 @contextlib.contextmanager
@@ -180,7 +222,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     if args.command == "tools":
-        return _cmd_tools(config, workspace)
+        return _cmd_tools(args, config, workspace)
     return _cmd_run(args, config, workspace)
 
 
@@ -269,14 +311,17 @@ def _split(value: str | None) -> list[str] | None:
     return [v.strip() for v in value.split(",") if v.strip()]
 
 
-def _cmd_tools(config: AgentOSConfig, workspace: Path) -> int:
+def _cmd_tools(args: argparse.Namespace, config: AgentOSConfig, workspace: Path) -> int:
     try:
-        with _open_log(None) as log, _registry(config, workspace, log) as (registry, _):
+        with (
+            _open_log(None) as log,
+            _registry(config, workspace, log, sandbox=args.sandbox) as (registry, _),
+        ):
             for tool in registry.tools():
                 first_line = (tool.description.strip().splitlines() or [""])[0]
-                if len(first_line) > 70:
-                    first_line = first_line[:67] + "..."
-                print(f"{tool.name:<34} {tool.source:<16} {first_line}")
+                if len(first_line) > 60:
+                    first_line = first_line[:57] + "..."
+                print(f"{tool.name:<34} {tool.source:<16} {tool.permission:<10} {first_line}")
     except MCPError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -295,7 +340,13 @@ def _cmd_run(args: argparse.Namespace, config: AgentOSConfig, workspace: Path) -
     budget = args.context_budget if args.context_budget is not None else int(0.75 * args.num_ctx)
     store = MemoryStore(args.memory_db) if args.memory != "none" else None
     try:
-        with _open_log(log_path) as log, _registry(config, workspace, log) as (registry, _):
+        with (
+            _open_log(log_path) as log,
+            _registry(config, workspace, log, sandbox=args.sandbox, policy=_policy(args)) as (
+                registry,
+                _,
+            ),
+        ):
             agent = make_agent(
                 args.agent,
                 llm,
