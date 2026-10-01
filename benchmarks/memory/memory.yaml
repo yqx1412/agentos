@@ -1,0 +1,90 @@
+category: memory
+# A6 multi-session tasks. Each `setup` prompt runs first as its own session (fresh agent and
+# conversation) sharing one memory store; `setup_files` are deleted before the last session.
+# Run with: agentos bench --tasks benchmarks/memory --memory none,tools,auto
+# With --memory none every task except mem-unrelated should fail: that is the control.
+tasks:
+  - id: mem-told
+    setup: ["My project's codename is Bluebird. Remember that for later."]
+    prompt: What is my project's codename? Write just the codename to codename.txt.
+    checks:
+      - {type: file_regex, path: codename.txt, pattern: '^\s*bluebird\s*$', flags: im}
+
+  - id: mem-port
+    notes: The value only exists in a file that is gone by session 2.
+    setup: ["Read config.txt and remember the API port for later."]
+    setup_files:
+      config.txt: "service=gateway\napi_port=9443\nlog_level=info\n"
+    prompt: Write the API port to port.txt.
+    checks:
+      - {type: file_number, path: port.txt, value: 9443}
+
+  - id: mem-deploy
+    setup: ["Remember this: our deploy server is build-07 and it listens on port 8443."]
+    prompt: Write the deploy server as host:port to deploy.txt.
+    checks:
+      - {type: file_regex, path: deploy.txt, pattern: '^\s*build-07:8443\s*$', flags: im}
+
+  - id: mem-update
+    notes: Two conflicting facts; the newer one must win.
+    setup:
+      - The office wifi network is called Teahouse. Remember it.
+      - "Update: the office wifi network was renamed to Coffeehouse. Remember the new name."
+    prompt: Write the current name of the office wifi network to wifi.txt.
+    checks:
+      - {type: file_regex, path: wifi.txt, pattern: '^\s*coffeehouse\s*$', flags: im}
+
+  - id: mem-distractor
+    setup:
+      - "Remember these hosts: the staging database is pg-stage-2, the production database is pg-prod-9 and the analytics database is ch-analytics-1."
+    prompt: Which host is the production database? Write only the host name to prod_db.txt.
+    checks:
+      - {type: file_regex, path: prod_db.txt, pattern: '^\s*pg-prod-9\s*$', flags: im}
+
+  - id: mem-episode
+    notes: Nothing is stored on purpose; only the recorded outcome of the earlier task has it.
+    setup: ["Add up the numbers in sales.txt and tell me the total."]
+    setup_files:
+      sales.txt: "north 412\nsouth 97\neast 230\nwest 548\n"
+    prompt: What was the sales total you computed last time? Write the number to total.txt.
+    checks:
+      - {type: file_number, path: total.txt, value: 1287}
+
+  - id: mem-synonym
+    notes: Little word overlap between the fact ("manager") and the question ("boss").
+    setup: ["Remember that my manager is Priya Raman."]
+    prompt: Who is my boss? Write the full name to boss.txt.
+    checks:
+      - {type: file_contains, path: boss.txt, values: [priya raman]}
+
+  - id: mem-two-facts
+    setup:
+      - "Remember: the Raft lecture is on Tuesday."
+      - "Remember: the Paxos lecture is on Thursday."
+    prompt: "Write the days of the Raft and Paxos lectures to schedule.txt as two lines, 'raft: <day>' and 'paxos: <day>'."
+    checks:
+      - {type: file_regex, path: schedule.txt, pattern: '^\s*raft\s*:\s*tuesday\s*$', flags: im}
+      - {type: file_regex, path: schedule.txt, pattern: '^\s*paxos\s*:\s*thursday\s*$', flags: im}
+
+  - id: mem-compute
+    setup: ["Remember that the team has 14 engineers and each engineer costs 9500 per month."]
+    prompt: Using what you know about the team, compute its total monthly cost and write the number to cost.txt.
+    checks:
+      - {type: file_number, path: cost.txt, value: 133000}
+
+  - id: mem-path
+    notes: The notes file stays; only where it is has to be remembered.
+    setup: ["My meeting notes from the planning meeting are in notes/2026-09-30.md. Remember where they are."]
+    files:
+      notes/2026-08-12.md: "# Retro\n\nAction items:\n- rotate the API keys\n"
+      notes/2026-09-30.md: "# Planning meeting\n\nAction items:\n- order two more GPUs\n- book the demo room\n"
+    prompt: Open my planning meeting notes and write their first action item to action.txt.
+    checks:
+      - {type: file_contains, path: action.txt, values: [order two more gpus]}
+
+  - id: mem-unrelated
+    notes: Interference control. Memory is irrelevant here and must not get in the way.
+    setup: ["Remember that my favourite number is 42."]
+    prompt: Compute 17 * 23 and write the result to out.txt.
+    checks:
+      - {type: file_number, path: out.txt, value: 391}

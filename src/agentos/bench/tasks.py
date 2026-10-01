@@ -42,6 +42,19 @@ class Task(BaseModel):
     max_steps: int = Field(default=12, ge=1)
     checks: list[Check] = Field(min_length=1)
     notes: str | None = None
+    # A6 memory tasks: earlier sessions run before ``prompt``, each in a fresh conversation
+    # sharing the memory store. ``setup_files`` exist only while those sessions run.
+    setup: list[str] = Field(default_factory=list)
+    setup_files: dict[str, str] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _setup_files_are_separate(self) -> Task:
+        if self.setup_files and not self.setup:
+            raise ValueError("setup_files needs at least one setup prompt")
+        overlap = sorted(set(self.setup_files) & set(self.files))
+        if overlap:
+            raise ValueError(f"paths in both files and setup_files: {overlap}")
+        return self
 
     @model_validator(mode="after")
     def _unchanged_targets_exist(self) -> Task:

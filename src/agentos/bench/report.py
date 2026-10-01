@@ -13,9 +13,19 @@ def _pct(passed: int, n: int) -> str:
 
 
 def _labeler(results: list[TaskResult]):
-    """Row label: the model, plus the agent kind when a run compares several."""
-    several = len({r.agent for r in results}) > 1
-    return (lambda r: f"{r.model} / {r.agent}") if several else (lambda r: r.model)
+    """Row label: the model, plus agent kind / memory mode when a run compares several."""
+    agents = len({r.agent for r in results}) > 1
+    memory = len({r.memory for r in results}) > 1
+
+    def label(r: TaskResult) -> str:
+        parts = [r.model]
+        if agents:
+            parts.append(r.agent)
+        if memory:
+            parts.append(f"mem-{r.memory}")
+        return " / ".join(parts)
+
+    return label
 
 
 def summary_table(results: list[TaskResult]) -> str:
@@ -73,6 +83,8 @@ def failures(results: list[TaskResult]) -> str:
             why = f"stopped: {r.stop_reason}"
         else:
             why = "; ".join(c["detail"] for c in r.checks if not c["ok"])
+        if r.setup_failed:
+            why += f" ({r.setup_failed} setup session(s) did not finish)"
         lines.append(f"- `{label(r)}` **{r.task_id}**: {why}")
     return "\n".join(lines) or "_none_"
 
