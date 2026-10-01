@@ -202,6 +202,45 @@ write-up: `benchmarks/results/a5-ablation.md`.
   reflection is the same model grading itself. A check that written `.json` files parse is
   the obvious next step.
 
+## Memory (A6)
+
+Long-term memory is one SQLite file (default `~/.agentos/memory.db`, outside any
+workspace) with **facts** (stored with the `remember` tool or `agentos memory add`) and
+**episodes** (every finished run's task, outcome and answer, recorded automatically).
+Lookup is keyword search: FTS5 with Porter stemming, ranked by BM25.
+
+```powershell
+uv run agentos run "Remember: the deploy server is build-07, port 8443." --memory auto
+uv run agentos run "Write the deploy server as host:port to deploy.txt." --memory auto
+uv run agentos memory list          # also: episodes, search QUERY, add TEXT, forget ID
+```
+
+`--memory tools` gives the model `remember` / `recall` / `forget`; `--memory auto` also
+searches memory with the task text and puts the hits in front of the task. Memory is off by
+default. The two commands above are the A6 demo: the second process wrote `build-07:8443`.
+
+Benchmark: 11 multi-session tasks in `benchmarks/memory/` (run with
+`--tasks benchmarks/memory --memory none,tools,auto`), 2 repeats:
+
+| Model | none | tools | auto |
+|---|---|---|---|
+| qwen3:8b | 2/22 | 6/22 | **20/22** |
+| qwen3:14b | 2/22 | 4/22 | **20/22** |
+| llama3.1:8b | 0/22 | 0/22 | 0/22 |
+
+- **The runtime has to hand memories over.** With tools alone, the qwen models stored facts
+  in 24 of 26 setup sessions but rarely called `recall` later; they guessed instead.
+- **Keyword search is the limit:** the one `auto` failure stores "manager" and asks about
+  "boss". DomainGraph's embedding search is meant to fix that.
+- **No measurable cost on the 38 regular tasks** (within one task per model), at 20-30%
+  more prompt tokens for the three extra tool schemas.
+
+Short-term memory: once a prompt exceeds `--context-budget` (default 75% of `--num-ctx`),
+the plain loop replaces the middle of its conversation with the old tool calls and each
+old output clipped to its first and last 300 characters. A model-written summary was tried
+first and rejected: qwen3:8b "summarized" file reads it had never been shown. Details in
+`benchmarks/results/a6-memory.md`.
+
 ## Architecture
 
 | Module | Role |
@@ -213,11 +252,12 @@ write-up: `benchmarks/results/a5-ablation.md`.
 | `planner.py` | `Planner`: JSON plan -> validated task graph (`Plan`, `Step`), revision after a failed step |
 | `executor.py` | `PlanningAgent`: direct / planned / fallback modes, step prompts, replanning, synthesis, verify + retry |
 | `verifier.py` | `Verifier`: text-call, file-name-as-content and ungrounded-number checks, then reflection |
+| `memory.py` | `MemoryStore` (SQLite + FTS5 facts and episodes), memory tools, `MemoryAgent`, `compact_messages` |
 | `config.py` | `agentos.toml` loading and validation, placeholder expansion |
 | `mcp_client.py` | `MCPManager`: stdio connections on a background asyncio loop, MCP tools -> `Tool`s |
 | `mcp_servers/textkit.py` | Example MCP server: `text_stats`, `word_frequency`, `find_lines` |
 | `bench/` | Benchmark: `tasks.py` (YAML schema), `checks.py`, `runner.py`, `report.py` |
-| `cli.py` | `agentos run [--agent KIND]`, `agentos tools`, `agentos bench [--agents KIND,...]` |
+| `cli.py` | `agentos run [--agent KIND] [--memory MODE]`, `agentos tools`, `agentos bench [--agents KIND,...] [--memory MODE,...]`, `agentos memory` |
 
 A malformed tool call (unknown tool, invalid JSON, missing or mistyped arguments) or a tool
 exception comes back to the model as an `ERROR: ...` tool message so it can correct itself.

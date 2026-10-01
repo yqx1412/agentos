@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from agentos.llm import LLM, Message
+from agentos.memory import compact_messages
 from agentos.tools import ToolRegistry
 
 DEFAULT_SYSTEM_PROMPT = """\
@@ -53,6 +54,7 @@ class AgentResult:
     mode: str = "plain"
     rejections: int = 0  # step results the verifier rejected (A5)
     retries: int = 0  # steps re-run with the verifier's feedback (A5)
+    compactions: int = 0  # times the conversation was summarized to fit (A6)
 
 
 class Agent:
@@ -64,6 +66,7 @@ class Agent:
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         max_steps: int = 10,
         tracer: Tracer | None = None,
+        context_budget: int | None = None,
     ) -> None:
         if max_steps < 1:
             raise ValueError("max_steps must be >= 1")
@@ -72,22 +75,55 @@ class Agent:
         self.system_prompt = system_prompt
         self.max_steps = max_steps
         self.tracer = tracer or Tracer(None)
+        # Short-term memory (A6): once a request's prompt exceeds this many tokens, the
+        # middle of the conversation is summarized before the next request. None = never.
+        self.context_budget = context_budget
 
     def run(self, task: str) -> AgentResult:
         messages = [
             Message(role="system", content=self.system_prompt),
             Message(role="user", content=task),
         ]
+        # ``messages`` is what the model sees; ``history`` keeps every message, so results
+        # and benchmark checks still see tool calls that compaction removed from view.
+        history = list(messages)
+
+        def add(m: Message) -> None:
+            messages.append(m)
+            history.append(m)
+
         schemas = self.tools.schemas()
         n_calls = n_errors = p_tok = c_tok = 0
+        self._compactions = 0
+        last_prompt = 0
         self.tracer.emit("run_start", model=self.llm.model, task=task, tools=self.tools.names())
 
         for step in range(1, self.max_steps + 1):
+            if self.context_budget is not None and last_prompt > self.context_budget:
+                # Deterministic clipping, not a model-written summary: in a live check,
+                # qwen3:8b was given the reads of part1-2.txt and its "summary" listed reads
+                # of part3-5.txt instead, values it had guessed from the file-name pattern.
+                compacted = compact_messages(messages)
+                if compacted is not None:
+                    before = len(messages)
+                    messages, sp, sc = compacted
+                    p_tok += sp
+                    c_tok += sc
+                    self._compactions += 1
+                    self.tracer.emit(
+                        "compact",
+                        step=step,
+                        prompt_tokens=last_prompt,
+                        messages_before=before,
+                        messages_after=len(messages),
+                        summary=messages[2].content,
+                    )
             resp = self.llm.chat(messages, schemas)
+            last_prompt = resp.prompt_tokens
             p_tok += resp.prompt_tokens
             c_tok += resp.completion_tokens
             reply = resp.message
-            messages.append(reply)
+            add(reply)
             self.tracer.emit(
                 "llm_response",
                 step=step,
@@ -99,7 +135,7 @@ class Agent:
 
             if not reply.tool_calls:
                 return self._finish(
-                    reply.content, "final_answer", step, n_calls, n_errors, p_tok, c_tok, messages
+                    reply.content, "final_answer", step, n_calls, n_errors, p_tok, c_tok, history
                 )
 
             for call in reply.tool_calls:
@@ -109,7 +145,7 @@ class Agent:
                 self.tracer.emit(
                     "tool_result", step=step, call=call.model_dump(), **result.model_dump()
                 )
-                messages.append(
+                add(
                     Message(
                         role="tool",
                         content=result.as_message_content(),
@@ -118,9 +154,9 @@ class Agent:
                     )
                 )
 
-        last = next((m.content for m in reversed(messages) if m.role == "assistant"), "")
+        last = next((m.content for m in reversed(history) if m.role == "assistant"), "")
         return self._finish(
-            last, "max_steps", self.max_steps, n_calls, n_errors, p_tok, c_tok, messages
+            last, "max_steps", self.max_steps, n_calls, n_errors, p_tok, c_tok, history
         )
 
     def _finish(
@@ -135,6 +171,7 @@ class Agent:
         messages: list[Message],
     ) -> AgentResult:
         result = AgentResult(answer, reason, steps, n_calls, n_errors, p_tok, c_tok, messages)
+        result.compactions = getattr(self, "_compactions", 0)
         self.tracer.emit(
             "run_end",
             answer=answer,
