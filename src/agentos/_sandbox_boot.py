@@ -100,6 +100,11 @@ class SandboxViolation(PermissionError):
     pass
 
 
+class SandboxImportError(ImportError):
+    """A blocked import. An ImportError, so stdlib code that probes for an optional module
+    (``ntpath`` tries ``_winapi`` on Linux) falls back instead of crashing."""
+
+
 def _inside(path, roots):
     p = _n(path)
     return any(p == r or p.startswith(r + os.sep) for r in roots)
@@ -135,7 +140,7 @@ def _hook(event, args):
     if event == "import":
         top = str(args[0]).split(".")[0]
         if top in BLOCKED_MODULES:
-            raise SandboxViolation(f"sandbox: importing {top!r} is not allowed")
+            raise SandboxImportError(f"sandbox: importing {top!r} is not allowed")
         return
     if event in BLOCKED_EVENTS or event.startswith(BLOCKED_PREFIXES):
         raise SandboxViolation(f"sandbox: {event} is not allowed")
