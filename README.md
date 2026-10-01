@@ -277,12 +277,13 @@ What a sandboxed call is up against, outermost first:
 `.git` is protected from every tool, `write_file` included, because writing `.git/config`
 turns "may run git" into "may run anything".
 
-`tests/test_sandbox.py` is the escape suite (57 cases): reading, writing, renaming or
+`tests/test_sandbox.py` is the escape suite (60 tests): reading, writing, renaming or
 deleting outside the workspace, `..`, absolute paths and `chdir`; `subprocess`,
 `os.system`, `exec`, `ctypes`, sockets and `urllib`; reaching blocked modules through
 `importlib` or `sys.modules`; installing a second audit hook; memory bombs, infinite loops,
 output floods and grandchild processes; leaked environment secrets; git config tricks;
-and dangerous calls without approval. All are blocked.
+and dangerous calls without approval. All are blocked. The symlink test needs symlink
+rights, so it is skipped on a default Windows account and runs on Linux in CI.
 
 **Limits, stated plainly:** an audit hook is not a security boundary (CPython says so),
 which is why native-code modules are blocked outright rather than watched. Reads of the
