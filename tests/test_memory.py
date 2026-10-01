@@ -212,10 +212,27 @@ def test_agent_compacts_over_budget_and_keeps_full_history(tmp_path: Path) -> No
         "read all"
     )
     assert res.stop_reason == "final_answer"
-    assert res.compactions >= 1 and llm.summaries == res.compactions
+    assert res.compactions >= 1
+    assert llm.summaries == 0  # the loop clips deterministically; no model-written summary
     assert any(SUMMARY_NOTE in m.content for m in llm.seen[-1])  # the model saw the summary
     # The result keeps every tool call, so benchmark checks are unaffected.
     assert sum(len(m.tool_calls) for m in res.messages) == 4
+
+
+def test_deterministic_compaction_keeps_both_ends_of_long_outputs() -> None:
+    long = "HEADER\n" + "filler " * 500 + "\nKEY1 = 111"
+    msgs = [Message(role="system", content="sys"), Message(role="user", content="task")]
+    for _ in range(3):
+        msgs.append(assistant("", ("read_file", {"path": "p.txt"})))
+        msgs.append(Message(role="tool", content=long, tool_name="read_file"))
+    out, p, c = compact_messages(msgs, keep_last=2)  # type: ignore[misc]
+    summary = out[2].content
+    assert (p, c) == (0, 0)
+    assert summary.count("HEADER") == 2 and summary.count("KEY1 = 111") == 2
+    assert "characters omitted" in summary and len(summary) < 2 * len(long)
+    # A second compaction keeps the first summary whole instead of clipping it again.
+    again, *_ = compact_messages([*out[:3], *msgs[2:]], keep_last=2)  # type: ignore[misc]
+    assert again[2].content.count("KEY1 = 111") >= 2
 
 
 def test_no_budget_means_no_compaction(tmp_path: Path) -> None:

@@ -408,11 +408,22 @@ def with_memory_tools(registry: ToolRegistry, store: MemoryStore) -> ToolRegistr
 
 SUMMARY_SYSTEM_PROMPT = """\
 You compress the middle of an agent's working conversation so it fits in the context window.
-Write a short summary of what has been done so far: tool calls made and what they returned,
-with every concrete value (numbers, names, file paths, file contents that are still needed)
-copied exactly. Do not add anything that is not in the conversation. No preamble."""
+In at most 120 words, list what has been done so far: each tool call and the values it
+returned that may still matter (numbers, names, file paths), copied exactly. Leave out
+filler text. Do not add anything that is not in the conversation. No preamble."""
 
 SUMMARY_NOTE = "Summary of the earlier part of this conversation (older messages were removed):"
+# Deterministic compaction keeps the start and end of each old tool output: file headers,
+# first lines and last lines survive; long middles go.
+CLIP_HEAD = 300
+CLIP_TAIL = 300
+
+
+def _clip_output(text: str) -> str:
+    if len(text) <= CLIP_HEAD + CLIP_TAIL + 40:
+        return text
+    omitted = len(text) - CLIP_HEAD - CLIP_TAIL
+    return f"{text[:CLIP_HEAD]}\n[... {omitted} characters omitted ...]\n{text[-CLIP_TAIL:]}"
 
 
 def _render(m: Message) -> str:
@@ -420,18 +431,25 @@ def _render(m: Message) -> str:
         calls = ", ".join(f"{c.name}({c.arguments})" for c in m.tool_calls)
         return f"assistant called: {calls}" + (f"\n  said: {m.content}" if m.content else "")
     if m.role == "tool":
-        return f"tool {m.tool_name} returned: {m.content}"
+        return f"tool {m.tool_name} returned: {_clip_output(m.content)}"
+    if m.role == "user" and m.content.startswith(SUMMARY_NOTE):
+        return m.content[len(SUMMARY_NOTE) :].strip()  # an earlier summary: keep it whole
     return f"{m.role}: {m.content}"
 
 
 def compact_messages(
-    messages: list[Message], llm: LLM, *, keep_last: int = 4
+    messages: list[Message], llm: LLM | None = None, *, keep_last: int = 4
 ) -> tuple[list[Message], int, int] | None:
     """Replace the middle of a conversation with one summary message.
 
     Keeps the system prompt, the task and the last ``keep_last`` messages. The cut is moved
     back to an assistant message, so a tool result is never separated from its call.
-    Returns ``(messages, prompt_tokens, completion_tokens)``, or None if nothing can be cut.
+
+    Without ``llm`` the summary is the middle itself with every tool output clipped to its
+    start and end (deterministic, loses nothing that sits at either end). With ``llm`` the
+    model writes the summary from that clipped text; if its summary is not shorter, the
+    clipped text is used instead. Returns ``(messages, prompt_tokens, completion_tokens)``,
+    or None if nothing can be cut.
     """
     head = 2  # system + task
     cut = len(messages) - keep_last
@@ -440,19 +458,21 @@ def compact_messages(
     if cut - head < 2:
         return None
     middle = "\n".join(_render(m) for m in messages[head:cut])
-    resp = llm.chat(
-        [
-            Message(role="system", content=SUMMARY_SYSTEM_PROMPT),
-            Message(role="user", content=f"Task: {messages[1].content}\n\n{middle}"),
-        ],
-        [],
-    )
-    summary = Message(role="user", content=f"{SUMMARY_NOTE}\n{resp.message.content.strip()}")
-    return (
-        [*messages[:head], summary, *messages[cut:]],
-        resp.prompt_tokens,
-        resp.completion_tokens,
-    )
+    text, p_tok, c_tok = middle, 0, 0
+    if llm is not None:
+        resp = llm.chat(
+            [
+                Message(role="system", content=SUMMARY_SYSTEM_PROMPT),
+                Message(role="user", content=f"Task: {messages[1].content}\n\n{middle}"),
+            ],
+            [],
+        )
+        p_tok, c_tok = resp.prompt_tokens, resp.completion_tokens
+        written = resp.message.content.strip()
+        if written and len(written) < len(middle):
+            text = written
+    summary = Message(role="user", content=f"{SUMMARY_NOTE}\n{text}")
+    return [*messages[:head], summary, *messages[cut:]], p_tok, c_tok
 
 
 def describe(store: MemoryStore) -> dict[str, Any]:

@@ -100,7 +100,10 @@ class Agent:
 
         for step in range(1, self.max_steps + 1):
             if self.context_budget is not None and last_prompt > self.context_budget:
-                compacted = compact_messages(messages, self.llm)
+                # Deterministic clipping, not a model-written summary: in a live check,
+                # qwen3:8b was given the reads of part1-2.txt and its "summary" listed reads
+                # of part3-5.txt instead, values it had guessed from the file-name pattern.
+                compacted = compact_messages(messages)
                 if compacted is not None:
                     before = len(messages)
                     messages, sp, sc = compacted
