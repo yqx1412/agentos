@@ -207,6 +207,7 @@ class MCPManager:
             fn=fn,
             input_schema=dict(t.input_schema),
             source=f"mcp:{server}",
+            permission=cfg.permission,
         )
 
     def call(self, server: str, tool: str, args: dict[str, Any], *, timeout: float) -> str:

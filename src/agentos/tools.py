@@ -11,9 +11,47 @@ from pydantic import BaseModel, ValidationError
 
 from agentos.llm import ToolCall
 
+# Permission levels (A7), lowest first. ``read`` tools only look; ``write`` tools change
+# the workspace or memory; ``dangerous`` tools run code or commands and need a human yes
+# unless the policy auto-approves that level.
+PERMISSION_LEVELS = ("read", "write", "dangerous")
+
 
 class ToolError(Exception):
     """Raised by a tool for an expected, user-facing failure (bad path, bad input...)."""
+
+
+Approver = Callable[["Tool", dict[str, Any]], bool]
+
+
+@dataclass(frozen=True)
+class Policy:
+    """Which tool calls run without asking.
+
+    Calls at or below ``auto_approve`` run directly. Higher ones go to ``approver`` (a human
+    prompt in the CLI); with no approver they are denied. Default: read and write run,
+    dangerous is denied.
+    """
+
+    auto_approve: str = "write"
+    approver: Approver | None = None
+
+    def __post_init__(self) -> None:
+        if self.auto_approve not in PERMISSION_LEVELS:
+            raise ValueError(f"auto_approve must be one of {PERMISSION_LEVELS}")
+
+    def allows(self, tool: Tool, args: dict[str, Any]) -> tuple[bool, str]:
+        level = PERMISSION_LEVELS.index(tool.permission)
+        if level <= PERMISSION_LEVELS.index(self.auto_approve):
+            return True, ""
+        if self.approver is None:
+            return False, (
+                f"{tool.name} is a {tool.permission!r} tool and needs approval, which this "
+                "run cannot ask for. Do the task with other tools."
+            )
+        if self.approver(tool, args):
+            return True, ""
+        return False, f"the user did not approve this {tool.name} call"
 
 
 class ToolResult(BaseModel):
@@ -39,10 +77,13 @@ class Tool:
     fn: Callable[[Any], Any]
     input_schema: dict[str, Any] | None = None
     source: str = "builtin"
+    permission: str = "read"
 
     def __post_init__(self) -> None:
         if self.args_model is None and self.input_schema is None:
             raise ValueError(f"tool {self.name!r} needs args_model or input_schema")
+        if self.permission not in PERMISSION_LEVELS:
+            raise ValueError(f"tool {self.name!r}: permission must be one of {PERMISSION_LEVELS}")
 
     def schema(self) -> dict[str, Any]:
         if self.args_model is not None:
@@ -59,8 +100,9 @@ class Tool:
 
 
 class ToolRegistry:
-    def __init__(self, tools: list[Tool] | None = None) -> None:
+    def __init__(self, tools: list[Tool] | None = None, *, policy: Policy | None = None) -> None:
         self._tools: dict[str, Tool] = {}
+        self.policy = policy or Policy()
         for t in tools or []:
             self.register(t)
 
@@ -106,6 +148,15 @@ class ToolRegistry:
                     for e in exc.errors()
                 )
                 return ToolResult(ok=False, output=f"invalid arguments for {tool.name}: {problems}")
+
+        # Checked after validation, so the approver is shown the arguments that will run.
+        shown = args.model_dump() if isinstance(args, BaseModel) else args
+        try:
+            allowed, why = self.policy.allows(tool, shown)
+        except Exception as exc:  # a broken approver denies; it never runs the call
+            allowed, why = False, f"approval failed: {type(exc).__name__}: {exc}"
+        if not allowed:
+            return ToolResult(ok=False, output=f"permission denied: {why}")
 
         try:
             out = tool.fn(args)

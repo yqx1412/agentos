@@ -21,8 +21,11 @@ import re
 import sys
 import tomllib
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+from agentos.sandbox import SandboxConfig
 
 SERVER_NAME_PATTERN = r"^[A-Za-z0-9_-]+$"
 
@@ -44,6 +47,9 @@ class MCPServerConfig(BaseModel):
     )
     timeout: float = Field(default=60.0, gt=0, description="Seconds per tool call")
     startup_timeout: float = Field(default=60.0, gt=0, description="Seconds to connect")
+    # A7: one level for all of this server's tools. AgentOS cannot see what a remote tool
+    # does, so the default assumes it may change things.
+    permission: Literal["read", "write", "dangerous"] = "write"
 
     def expanded(self, workspace: Path) -> MCPServerConfig:
         subs = {"workspace": str(workspace), "python": sys.executable}
@@ -67,6 +73,7 @@ class AgentOSConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
+    sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
 
     def enabled_servers(self, workspace: Path) -> dict[str, MCPServerConfig]:
         return {
