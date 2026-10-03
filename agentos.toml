@@ -17,3 +17,18 @@ startup_timeout = 120  # first run downloads the package
 [mcp_servers.textkit]
 command = "{python}"
 args = ["-m", "agentos.mcp_servers.textkit"]
+
+# DomainGraph (Project 2, D5): lecture search with timestamps, concepts, and the graph-backed
+# long-term memory used by `--memory-backend domaingraph`. Off by default because it needs
+# Neo4j running (`docker compose up -d` in ../domaingraph). The memory backend uses this
+# entry even while it is disabled; enable it (or use examples/domaingraph/agentos.toml) to
+# give the agent DomainGraph's tools directly.
+[mcp_servers.domaingraph]
+enabled = false
+command = "uv"
+args = ["run", "--quiet", "domaingraph", "mcp"]
+cwd = "../domaingraph"   # relative to where agentos runs (this repo's root)
+tools = ["search", "get_concept", "related_concepts"]
+permission = "read"
+startup_timeout = 120
+timeout = 120

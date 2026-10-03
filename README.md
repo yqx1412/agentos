@@ -244,6 +244,29 @@ old output clipped to its first and last 300 characters. A model-written summary
 first and rejected: qwen3:8b "summarized" file reads it had never been shown. Details in
 `benchmarks/results/a6-memory.md`.
 
+### DomainGraph as the memory backend (D5)
+
+`--memory-backend domaingraph` (on `run`, `bench` and `memory`) keeps long-term memory in
+[DomainGraph](../domaingraph)'s Neo4j graph instead of SQLite, through its MCP server. It needs
+Neo4j and Ollama with bge-m3 running. The tools and auto-injection work as before, but recall
+is by meaning:
+
+| Model | auto, SQLite | auto, DomainGraph |
+|---|---|---|
+| qwen3:8b | 20/22 | **22/22** |
+| qwen3:14b | 20/22 | **22/22** |
+
+The task SQLite misses, "boss" vs "manager", passes on DomainGraph. Tools-only memory stays
+weak on both backends, because the models rarely call `recall`. Details are in
+`benchmarks/results/a6-domaingraph-memory.md`.
+
+`examples/domaingraph/agentos.toml` also gives the agent DomainGraph's lecture tools:
+
+```powershell
+uv run agentos run --config examples/domaingraph/agentos.toml `
+    "What did lecture 7 say about radix sort? Cite the lecture and timestamps."
+```
+
 ## Sandboxing and permissions (A7)
 
 Every tool has a permission level: `read`, `write` or `dangerous`. Calls at or below

@@ -28,10 +28,19 @@ from agentos.config import AgentOSConfig, ConfigError
 from agentos.executor import PlanningAgent
 from agentos.llm import LLM, LLMError
 from agentos.mcp_client import MCPError, MCPManager
-from agentos.memory import MemoryAgent, MemoryStore, with_memory_tools
+from agentos.memory import Memory, MemoryAgent, MemoryStore, with_memory_tools
 from agentos.tools import ToolRegistry
 
 LLMFactory = Callable[[str], LLM]
+# Opens a fresh, empty long-term memory for one task; ``tmp`` is the task's temp dir.
+MemoryFactory = Callable[[Path, str], Memory]
+
+
+def sqlite_memory(tmp: Path, task_id: str) -> Memory:
+    # Outside the workspace, so file tools cannot read the database directly.
+    return MemoryStore(tmp / "memory.db")
+
+
 # Agent kinds, cumulative for the A5 ablation: each adds one mechanism to the previous.
 AGENT_KINDS: dict[str, dict[str, Any] | None] = {
     "plain": None,  # the A1 loop
@@ -50,7 +59,7 @@ def make_agent(
     *,
     max_steps: int,
     tracer: Tracer,
-    memory: MemoryStore | None = None,
+    memory: Memory | None = None,
     memory_mode: str = "none",
     context_budget: int | None = None,
 ) -> Agent | PlanningAgent | MemoryAgent:
@@ -141,6 +150,7 @@ def run_task(
     mcp_log_path: Path | None = None,
     agent_kind: str = "plain",
     memory_mode: str = "none",
+    memory_factory: MemoryFactory = sqlite_memory,
 ) -> TaskResult:
     """Run one task. A task with ``setup`` runs those prompts first, each as a separate
     session (fresh agent, fresh conversation, fresh MCP servers) sharing one memory store;
@@ -152,8 +162,7 @@ def run_task(
         workspace.mkdir()
         _seed(workspace, {**task.files, **task.setup_files})
         servers = {n: c for n, c in config.enabled_servers(workspace).items() if n in task.servers}
-        # Outside the workspace, so file tools cannot read the database directly.
-        store = MemoryStore(Path(tmp) / "memory.db") if memory_mode != "none" else None
+        store = memory_factory(Path(tmp), task.id) if memory_mode != "none" else None
         tracer = Tracer(trace_path)
         sessions = [*task.setup, task.prompt]
 
@@ -272,6 +281,7 @@ def run_bench(
     progress: Progress | None = None,
     agents: list[str] | None = None,
     memory_modes: list[str] | None = None,
+    memory_factory: MemoryFactory = sqlite_memory,
 ) -> list[TaskResult]:
     """Run every task ``repeats`` times per model, agent kind and memory mode.
 
@@ -328,6 +338,7 @@ def run_bench(
                         mcp_log_path=out_dir / "mcp.log" if task.servers else None,
                         agent_kind=kind,
                         memory_mode=mem,
+                        memory_factory=memory_factory,
                     )
                     results.append(result)
                     sink.write(result.model_dump_json() + "\n")

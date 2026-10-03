@@ -1,0 +1,16 @@
+# D5 demo: AgentOS with DomainGraph's lecture tools (search, get_concept, related_concepts).
+# Needs Neo4j (`docker compose up -d` in ../domaingraph) and Ollama with bge-m3.
+#
+#   uv run agentos run --config examples/domaingraph/agentos.toml --no-trace \
+#       "What did lecture 7 say about radix sort? Cite the lecture and timestamps."
+#
+# Paths are relative to the agentos repo root, where the command runs.
+
+[mcp_servers.domaingraph]
+command = "uv"
+args = ["run", "--quiet", "domaingraph", "mcp"]
+cwd = "../domaingraph"
+tools = ["search", "get_concept", "related_concepts"]
+permission = "read"
+startup_timeout = 120
+timeout = 120
