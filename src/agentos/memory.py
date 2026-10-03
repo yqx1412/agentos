@@ -244,21 +244,47 @@ class MemoryStore:
 
     def context_for(self, task: str, *, k_facts: int = 5, k_episodes: int = 3) -> str:
         """The memory block prepended to a task, or "" when nothing matches."""
-        facts = self.search_facts(task, k_facts, touch=True)
-        episodes = self.search_episodes(task, k_episodes)
-        if not facts and not episodes:
-            return ""
-        lines = [
-            "Memory from earlier sessions (newest first; it may or may not be relevant, and "
-            "when two entries conflict the newer one is correct):"
-        ]
-        lines += [f"- fact #{f.id} ({_day(f.created)}): {f.text}" for f in facts]
-        lines += [
-            f"- past task ({_day(e.created)}, {e.outcome}): {_clip(e.task, 200)} "
-            f"-> {_clip(e.answer, 300)}"
-            for e in episodes
-        ]
-        return "\n".join(lines)
+        return context_block(self, task, k_facts=k_facts, k_episodes=k_episodes)
+
+    def describe(self) -> dict[str, Any]:
+        return describe(self)
+
+
+class Memory(Protocol):
+    """What the memory tools and :class:`MemoryAgent` need from a store. Implemented by
+    :class:`MemoryStore` (SQLite) and ``agentos.memory_domaingraph.DomainGraphMemory``."""
+
+    def add_fact(self, text: str, source: str = "agent") -> tuple[Fact, bool]: ...
+    def forget(self, fact_id: int) -> bool: ...
+    def facts(self, limit: int = 100) -> list[Fact]: ...
+    def search_facts(self, query: str, k: int = 5, *, touch: bool = False) -> list[Fact]: ...
+    def add_episode(
+        self, task: str, outcome: str, answer: str, *, model: str = "", agent: str = ""
+    ) -> Episode: ...
+    def episodes(self, limit: int = 100) -> list[Episode]: ...
+    def search_episodes(self, query: str, k: int = 3) -> list[Episode]: ...
+    def context_for(self, task: str, *, k_facts: int = 5, k_episodes: int = 3) -> str: ...
+    def describe(self) -> dict[str, Any]: ...
+    def close(self) -> None: ...
+
+
+def context_block(store: Memory, task: str, *, k_facts: int = 5, k_episodes: int = 3) -> str:
+    """The memory block prepended to a task, or "" when nothing matches."""
+    facts = store.search_facts(task, k_facts, touch=True)
+    episodes = store.search_episodes(task, k_episodes)
+    if not facts and not episodes:
+        return ""
+    lines = [
+        "Memory from earlier sessions (newest first; it may or may not be relevant, and "
+        "when two entries conflict the newer one is correct):"
+    ]
+    lines += [f"- fact #{f.id} ({_day(f.created)}): {f.text}" for f in facts]
+    lines += [
+        f"- past task ({_day(e.created)}, {e.outcome}): {_clip(e.task, 200)} "
+        f"-> {_clip(e.answer, 300)}"
+        for e in episodes
+    ]
+    return "\n".join(lines)
 
 
 def _clip(text: str, limit: int) -> str:
@@ -293,7 +319,7 @@ class ForgetArgs(BaseModel):
     id: int = Field(description="The fact id shown by recall, e.g. 3")
 
 
-def memory_tools(store: MemoryStore) -> list[Tool]:
+def memory_tools(store: Memory) -> list[Tool]:
     def remember(args: RememberArgs) -> str:
         try:
             fact, created = store.add_fact(args.fact)
@@ -370,7 +396,7 @@ class MemoryAgent:
     def __init__(
         self,
         inner: _Runner,
-        store: MemoryStore,
+        store: Memory,
         *,
         inject: bool = True,
         model: str = "",
@@ -400,7 +426,7 @@ class MemoryAgent:
         return res
 
 
-def with_memory_tools(registry: ToolRegistry, store: MemoryStore) -> ToolRegistry:
+def with_memory_tools(registry: ToolRegistry, store: Memory) -> ToolRegistry:
     for tool in memory_tools(store):
         registry.register(tool)
     return registry

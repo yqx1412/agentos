@@ -15,13 +15,20 @@ from typing import TextIO
 from agentos import __version__
 from agentos.agent import Tracer
 from agentos.bench.report import render_markdown, summary_table
-from agentos.bench.runner import AGENT_KINDS, MEMORY_MODES, TaskResult, make_agent, run_bench
+from agentos.bench.runner import (
+    AGENT_KINDS,
+    MEMORY_MODES,
+    TaskResult,
+    make_agent,
+    run_bench,
+    sqlite_memory,
+)
 from agentos.bench.tasks import TaskError, load_tasks, select_tasks
 from agentos.builtin_tools import builtin_tools
 from agentos.config import AgentOSConfig, ConfigError, load_config
 from agentos.llm import LLMError, OllamaLLM
 from agentos.mcp_client import MCPError, MCPManager
-from agentos.memory import MemoryStore, describe
+from agentos.memory import MemoryStore
 from agentos.sandbox import sandbox_tools
 from agentos.tools import PERMISSION_LEVELS, Policy, Tool, ToolRegistry
 
@@ -29,6 +36,20 @@ DEFAULT_CONFIG = Path("agentos.toml")
 DEFAULT_TASKS = Path("benchmarks/tasks")
 # Outside any workspace, so the agent's file tools cannot touch the database.
 DEFAULT_MEMORY_DB = Path.home() / ".agentos" / "memory.db"
+MEMORY_BACKENDS = ["sqlite", "domaingraph"]
+
+
+def _memory_backend_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--memory-backend",
+        choices=MEMORY_BACKENDS,
+        default="sqlite",
+        help="sqlite (keyword search, --memory-db) or domaingraph (Neo4j + embeddings, via "
+        "the [mcp_servers.domaingraph] config entry)",
+    )
+    p.add_argument(
+        "--memory-scope", default="default", help="domaingraph only: whose memories to use"
+    )
 
 
 def _add_common(p: argparse.ArgumentParser) -> None:
@@ -84,6 +105,7 @@ def build_parser() -> argparse.ArgumentParser:
         "relevant memories added to the task)",
     )
     run.add_argument("--memory-db", type=Path, default=DEFAULT_MEMORY_DB, help="SQLite memory file")
+    _memory_backend_args(run)
     run.add_argument(
         "--context-budget",
         type=int,
@@ -95,6 +117,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     mem = sub.add_parser("memory", help="Inspect or edit long-term memory")
     mem.add_argument("--db", type=Path, default=DEFAULT_MEMORY_DB, help="SQLite memory file")
+    _memory_backend_args(mem)
+    mem.add_argument("--config", type=Path, default=None, help="Config (for domaingraph)")
     mem_sub = mem.add_subparsers(dest="memory_command", required=True)
     mem_sub.add_parser("list", help="List stored facts, newest first")
     mem_sub.add_parser("episodes", help="List past task outcomes, newest first")
@@ -127,6 +151,15 @@ def build_parser() -> argparse.ArgumentParser:
         default="none",
         help="Comma-separated memory modes to compare: none, tools, auto (default: none)",
     )
+    bench.add_argument(
+        "--memory-backend",
+        choices=MEMORY_BACKENDS,
+        default="sqlite",
+        help="Long-term memory store (domaingraph: one fresh scope per task)",
+    )
+    bench.add_argument(
+        "--workspace", type=Path, default=Path("."), help=argparse.SUPPRESS
+    )  # only for {workspace} in the domaingraph server entry
     bench.add_argument("--out", type=Path, default=Path("runs/bench"), help="Results root")
     bench.add_argument("--list", action="store_true", help="List the selected tasks and exit")
     bench.add_argument("--ollama-url", default="http://127.0.0.1:11434")
@@ -263,6 +296,20 @@ def _cmd_bench(args: argparse.Namespace, config: AgentOSConfig) -> int:
     def factory(model: str) -> OllamaLLM:
         return OllamaLLM(model, args.ollama_url, num_ctx=args.num_ctx, timeout=args.timeout)
 
+    base_memory = None
+    memory_factory = sqlite_memory
+    if args.memory_backend == "domaingraph" and any(m != "none" for m in memory_modes):
+        try:
+            base_memory = _connect_domaingraph(config, args.workspace.resolve())
+        except (ConfigError, MCPError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+
+        def memory_factory(tmp: Path, task_id: str):  # one fresh scope per task
+            return base_memory.scoped(f"bench-{task_id}")
+
+    settings["memory_backend"] = args.memory_backend
+
     def progress(r: TaskResult, done: int, total: int) -> None:
         status = "PASS" if r.passed else "FAIL"
         why = ""
@@ -289,6 +336,7 @@ def _cmd_bench(args: argparse.Namespace, config: AgentOSConfig) -> int:
             progress=progress,
             agents=agents,
             memory_modes=memory_modes,
+            memory_factory=memory_factory,
         )
     except ConfigError as exc:
         print(f"config error: {exc}", file=sys.stderr)
@@ -296,6 +344,9 @@ def _cmd_bench(args: argparse.Namespace, config: AgentOSConfig) -> int:
     except LLMError as exc:  # warmup failed: model missing or Ollama down
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    finally:
+        if base_memory is not None:
+            base_memory.close()
 
     meta = json.loads((out_dir / "meta.json").read_text(encoding="utf-8"))
     report = render_markdown(results, meta)
@@ -338,7 +389,11 @@ def _cmd_run(args: argparse.Namespace, config: AgentOSConfig, workspace: Path) -
 
     llm = OllamaLLM(args.model, args.ollama_url, think=args.think, num_ctx=args.num_ctx)
     budget = args.context_budget if args.context_budget is not None else int(0.75 * args.num_ctx)
-    store = MemoryStore(args.memory_db) if args.memory != "none" else None
+    try:
+        store = _open_memory(args, config, workspace) if args.memory != "none" else None
+    except (ConfigError, MCPError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     try:
         with (
             _open_log(log_path) as log,
@@ -391,8 +446,39 @@ def _cmd_run(args: argparse.Namespace, config: AgentOSConfig, workspace: Path) -
     return 0 if result.stop_reason == "final_answer" else 3
 
 
+def _connect_domaingraph(config: AgentOSConfig, workspace: Path):
+    """The DomainGraph memory backend, from the ``[mcp_servers.domaingraph]`` entry. It is
+    used even when that entry is disabled: ``enabled`` only decides whether the agent also
+    sees DomainGraph's tools directly."""
+    from agentos.memory_domaingraph import SERVER, DomainGraphMemory
+
+    cfg = config.mcp_servers.get(SERVER)
+    if cfg is None:
+        raise ConfigError(
+            f"--memory-backend domaingraph needs an [mcp_servers.{SERVER}] entry in the config"
+        )
+    return DomainGraphMemory.connect(cfg.expanded(workspace), errlog=open(os.devnull, "w"))
+
+
+def _open_memory(args: argparse.Namespace, config: AgentOSConfig, workspace: Path):
+    if getattr(args, "memory_backend", "sqlite") == "domaingraph":
+        mem = _connect_domaingraph(config, workspace)
+        mem.scope = args.memory_scope
+        return mem
+    return MemoryStore(args.memory_db)
+
+
 def _cmd_memory(args: argparse.Namespace) -> int:
-    with MemoryStore(args.db) as store:
+    if args.memory_backend == "domaingraph":
+        try:
+            config = _load(args)
+            store = _open_memory(args, config, Path.cwd())
+        except (ConfigError, MCPError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+    else:
+        store = MemoryStore(args.db)
+    with store:
         cmd = args.memory_command
         if cmd == "list":
             for f in store.facts():
@@ -419,7 +505,7 @@ def _cmd_memory(args: argparse.Namespace) -> int:
                 print(f"no fact #{args.id}", file=sys.stderr)
                 return 1
             print(f"deleted fact #{args.id}")
-        info = describe(store)
+        info = store.describe()
         print(
             f"\n{info['facts']} facts, {info['episodes']} episodes in {info['path']}",
             file=sys.stderr,
