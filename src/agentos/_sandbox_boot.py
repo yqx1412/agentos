@@ -9,6 +9,7 @@ so everything the code does passes through it. See agentos/sandbox.py for what t
 and does not protect against.
 """
 
+import ast
 import os
 import sys
 
@@ -170,6 +171,17 @@ os.chdir(WORKSPACE)
 sys.path[:] = [p for p in sys.path if _inside(p, READ_ROOTS[2:])] if len(READ_ROOTS) > 2 else []
 sys.addaudithook(_hook)
 
-_code = compile(SOURCE, "<agent code>", "exec")
+# Notebook-style echo: models often end a script with a bare expression (``a, b``) and
+# expect to see it. A plain script would print nothing, so print a trailing
+# expression's repr unless it is None (e.g. a final ``print(...)`` call).
+_tree = ast.parse(SOURCE, "<agent code>")
+_last = None
+if _tree.body and isinstance(_tree.body[-1], ast.Expr):
+    _last = ast.Expression(_tree.body.pop().value)
 del SOURCE
-exec(_code, {"__name__": "__main__", "__builtins__": __builtins__})
+_globals = {"__name__": "__main__", "__builtins__": __builtins__}
+exec(compile(_tree, "<agent code>", "exec"), _globals)
+if _last is not None:
+    _value = eval(compile(_last, "<agent code>", "eval"), _globals)
+    if _value is not None:
+        print(repr(_value))
