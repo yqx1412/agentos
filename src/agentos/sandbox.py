@@ -137,6 +137,10 @@ class RunResult:
         for name, text in (("stdout", self.stdout), ("stderr", self.stderr)):
             if text.strip():
                 parts.append(f"--- {name} ---\n{_cap(text, limit)}")
+        if len(parts) == 1 and not self.timed_out:
+            # An empty success reads like "it worked" and invites the model to invent the
+            # numbers it never saw. Say plainly that nothing was printed.
+            parts.append("(no output: the code printed nothing. Use print() to see results.)")
         return "\n".join(parts)
 
 

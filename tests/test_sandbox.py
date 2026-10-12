@@ -52,6 +52,31 @@ def blocked(r: RunResult) -> bool:
 # -- run_python: what still works ------------------------------------------------------
 
 
+def test_python_echoes_a_trailing_expression(ws: Path) -> None:
+    # A notebook habit: the script ends with a bare value and expects to see it.
+    r = py(ws, "w = 14.7e9 * 4.28 / 8 / 1024**3\nkv = 0.75\nround(w, 2), kv")
+    assert r.returncode == 0
+    assert r.stdout.strip() == "(7.32, 0.75)"
+
+
+def test_python_does_not_echo_none_or_non_final_expressions(ws: Path) -> None:
+    r = py(ws, "1 + 1\nprint('done')")
+    assert r.stdout.strip() == "done"  # the final print returns None: no extra "None"
+
+
+def test_python_echo_still_passes_through_the_sandbox(ws: Path) -> None:
+    r = py(ws, "open('../secret.txt').read()")
+    assert blocked(r)
+    assert "TOPSECRET" not in r.stdout
+
+
+def test_render_says_when_nothing_was_printed(ws: Path) -> None:
+    out = py(ws, "x = 1").render(1000)
+    assert out.startswith("exit code 0")
+    assert "no output" in out and "print()" in out
+    assert "no output" not in py(ws, "print(1)").render(1000)
+
+
 def test_python_normal_work_inside_the_workspace(ws: Path) -> None:
     r = py(
         ws,
