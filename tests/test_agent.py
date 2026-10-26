@@ -121,4 +121,6 @@ def test_trace_is_written_as_jsonl(tmp_path: Path) -> None:
         "run_end",
     ]
     assert events[2]["output"] == "42"
+    # ScriptedLLM's replies carry no done_reason; the field is written anyway.
+    assert events[1]["done_reason"] == ""
     assert events[-1]["prompt_tokens"] == result.prompt_tokens == 20

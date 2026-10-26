@@ -37,6 +37,10 @@ class ChatResponse(BaseModel):
     message: Message
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    # Why the backend stopped the reply, as Ollama reports it: "stop", or "length" when
+    # num_predict cut it off. With thinking on, a cut-off reply can have no content at all.
+    # Empty when the backend doesn't say.
+    done_reason: str = ""
 
 
 class LLM(Protocol):
@@ -134,6 +138,7 @@ class OllamaLLM:
             message=Message(role="assistant", content=raw.get("content") or "", tool_calls=calls),
             prompt_tokens=int(data.get("prompt_eval_count") or 0),
             completion_tokens=int(data.get("eval_count") or 0),
+            done_reason=str(data.get("done_reason") or ""),
         )
 
     def close(self) -> None:

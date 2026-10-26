@@ -27,6 +27,7 @@ def test_request_and_response_mapping() -> None:
                 },
                 "prompt_eval_count": 120,
                 "eval_count": 15,
+                "done_reason": "stop",
             },
         )
 
@@ -49,6 +50,33 @@ def test_request_and_response_mapping() -> None:
     assert resp.message.tool_calls[0].name == "calculator"
     assert resp.message.tool_calls[0].arguments == {"expression": "1+1"}
     assert (resp.prompt_tokens, resp.completion_tokens) == (120, 15)
+    assert resp.done_reason == "stop"
+
+
+def test_done_reason_reports_a_reply_cut_off_while_thinking() -> None:
+    # qwen3 with think=true can spend all of num_predict thinking: Ollama then returns no
+    # content and done_reason "length", which is the only sign the reply was cut off.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "message": {"role": "assistant", "content": "", "thinking": "Hmm, 7.7 or 7.70"},
+                "prompt_eval_count": 1270,
+                "eval_count": 2048,
+                "done_reason": "length",
+            },
+        )
+
+    resp = make_llm(handler).chat([Message(role="user", content="hi")], tools=[])
+    assert resp.message.content == ""
+    assert (resp.completion_tokens, resp.done_reason) == (2048, "length")
+
+
+def test_done_reason_is_empty_when_the_backend_omits_it() -> None:
+    resp = make_llm(
+        lambda _: httpx.Response(200, json={"message": {"role": "assistant", "content": "ok"}})
+    ).chat([Message(role="user", content="hi")], tools=[])
+    assert resp.done_reason == ""
 
 
 def test_http_error_becomes_llm_error() -> None:

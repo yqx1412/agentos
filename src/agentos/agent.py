@@ -131,6 +131,7 @@ class Agent:
                 tool_calls=[c.model_dump() for c in reply.tool_calls],
                 prompt_tokens=resp.prompt_tokens,
                 completion_tokens=resp.completion_tokens,
+                done_reason=resp.done_reason,
             )
 
             if not reply.tool_calls:
